@@ -20,7 +20,15 @@ import (
 func (r *TypstRenderer) run(ctx context.Context, ws, op string, args []string, stdoutLimit int64) ([]byte, []byte, error) {
 	cmd := r.command(ctx, r.cfg.TypstPath, args)
 	cmd.Dir = ws
-	cmd.Env = r.env
+	// HOME and all temporary directories point into the throwaway workspace, so
+	// a subprocess cannot read host state through them.
+	cmd.Env = append(append([]string{}, r.env...),
+		"HOME="+ws,
+		"TMPDIR="+ws,
+		"TMP="+ws,
+		"TEMP="+ws,
+		"XDG_CACHE_HOME="+filepath.Join(ws, "xdg-cache"),
+	)
 	cmd.Stdin = nil
 	stderr := &limitedBuffer{limit: r.cfg.StderrLimit}
 	cmd.Stderr = stderr
@@ -112,7 +120,10 @@ func (b *limitedBuffer) bytes() []byte {
 func (b *limitedBuffer) text(ws string) string {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	out := scrub(ws, b.buf.String())
+	out := b.buf.String()
+	if ws != "" {
+		out = scrub(ws, out)
+	}
 	if b.dropped > 0 {
 		out += fmt.Sprintf("\n[... %d more bytes truncated]", b.dropped)
 	}
@@ -128,18 +139,24 @@ func scrub(ws, s string) string { return strings.ReplaceAll(s, ws, "<workspace>"
 // locations are removed: they are passed as explicit flags. Every proxy is
 // blackholed so an unexpected package download fails closed, offline.
 func childEnv() []string {
-	env := make([]string, 0, len(os.Environ())+8)
+	// A whitelist keeps credentials and unrelated host configuration out of the
+	// Typst process and any wasm plugin it loads. HOME and temporary paths are
+	// replaced per workspace in run.
+	allowed := map[string]bool{
+		"PATH": true, "LANG": true, "LC_ALL": true, "LC_CTYPE": true,
+		"SYSTEMROOT": true, "WINDIR": true, "PATHEXT": true,
+	}
+	env := make([]string, 0, len(allowed)+10)
 	for _, kv := range os.Environ() {
-		switch name, _, _ := strings.Cut(kv, "="); name {
-		case "TYPST_PACKAGE_PATH", "TYPST_PACKAGE_CACHE_PATH", "TYPST_ROOT":
-			continue
+		name, _, _ := strings.Cut(kv, "=")
+		if allowed[name] {
+			env = append(env, kv)
 		}
-		env = append(env, kv)
 	}
 	for _, name := range []string{"HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy", "ALL_PROXY", "all_proxy"} {
 		env = append(env, name+"="+blackholeProxy)
 	}
-	return append(env, "NO_PROXY=", "no_proxy=")
+	return append(env, "NO_PROXY=", "no_proxy=", "TZ=UTC", "SOURCE_DATE_EPOCH="+creationTimestamp)
 }
 
 // loadTemplateFiles reads the .typ files of the template directory once. The

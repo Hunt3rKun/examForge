@@ -1,13 +1,18 @@
 package render
 
 import (
+	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 
 	"golang.org/x/sync/errgroup"
 
@@ -19,6 +24,27 @@ func (r *TypstRenderer) Render(ctx context.Context, exam ir.ExamDocumentIR, layo
 	if err := ctx.Err(); err != nil {
 		return nil, &RenderError{Op: "render", Err: err}
 	}
+	// A caller deadline is obeyed as is. Without one, bound the whole render,
+	// including waiting for a slot: a queue wait must never be unbounded.
+	if _, hasDeadline := ctx.Deadline(); !hasDeadline {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeoutCause(ctx, r.cfg.Timeout, ErrRenderTimeout)
+		defer cancel()
+	}
+	examData, err := json.Marshal(exam)
+	if err != nil {
+		return nil, &RenderError{Op: "validate exam", Err: fmt.Errorf("%w: encode: %v", ErrInvalidInput, err)}
+	}
+	layoutData, err := json.Marshal(layout)
+	if err != nil {
+		return nil, &RenderError{Op: "validate layout", Err: fmt.Errorf("%w: encode: %v", ErrInvalidInput, err)}
+	}
+	if err := r.validator.ValidateExam(examData); err != nil {
+		return nil, &RenderError{Op: "validate exam", Err: fmt.Errorf("%w: %v", ErrInvalidInput, err)}
+	}
+	if err := r.validator.ValidateLayout(layoutData); err != nil {
+		return nil, &RenderError{Op: "validate layout", Err: fmt.Errorf("%w: %v", ErrInvalidInput, err)}
+	}
 	payload, err := Precompile(exam, layout)
 	if err != nil {
 		return nil, err
@@ -28,16 +54,12 @@ func (r *TypstRenderer) Render(ctx context.Context, exam ir.ExamDocumentIR, layo
 	select {
 	case r.sem <- struct{}{}:
 	case <-ctx.Done():
+		if errors.Is(context.Cause(ctx), ErrRenderTimeout) {
+			return nil, &RenderError{Op: "wait for render slot", Err: fmt.Errorf("%w: %w: %w", ErrQueueTimeout, ErrRenderTimeout, ctx.Err())}
+		}
 		return nil, &RenderError{Op: "wait for render slot", Err: ctx.Err()}
 	}
 	defer func() { <-r.sem }()
-
-	// A caller deadline is obeyed as is. Without one, bound the whole render.
-	if _, hasDeadline := ctx.Deadline(); !hasDeadline {
-		var cancel context.CancelFunc
-		ctx, cancel = context.WithTimeoutCause(ctx, r.cfg.Timeout, ErrRenderTimeout)
-		defer cancel()
-	}
 
 	ws, cleanup, err := r.assemble(ctx, exam, payload)
 	if err != nil {
@@ -106,12 +128,16 @@ func (r *TypstRenderer) copyAssets(ctx context.Context, ws string, exam ir.ExamD
 	}
 	group, gctx := errgroup.WithContext(ctx)
 	group.SetLimit(r.cfg.AssetConcurrency)
+	var total atomic.Int64
 	for i := range payload.Assets {
 		asset := &payload.Assets[i]
 		group.Go(func() error {
-			sum, err := r.copyAsset(gctx, ws, asset, exam.Assets[asset.AssetID])
+			sum, size, err := r.copyAsset(gctx, ws, asset, exam.Assets[asset.AssetID])
 			if err != nil {
 				return fmt.Errorf("asset %q: %w", asset.AssetID, err)
+			}
+			if got := total.Add(size); got > r.cfg.MaxTotalAssetBytes {
+				return fmt.Errorf("asset %q: %w: total asset bytes %d exceed limit %d", asset.AssetID, ErrAssetTooLarge, got, r.cfg.MaxTotalAssetBytes)
 			}
 			asset.SHA256 = sum
 			return nil
@@ -129,29 +155,70 @@ func (r *TypstRenderer) copyAssets(ctx context.Context, ws string, exam ir.ExamD
 }
 
 // copyAsset streams one asset into the workspace and returns its SHA-256.
-func (r *TypstRenderer) copyAsset(ctx context.Context, ws string, asset *ResolvedAsset, meta ir.Asset) (string, error) {
+func (r *TypstRenderer) copyAsset(ctx context.Context, ws string, asset *ResolvedAsset, meta ir.Asset) (string, int64, error) {
 	target := filepath.Join(ws, filepath.FromSlash(asset.Path))
 	if _, err := relUnder(ws, target); err != nil {
 		// Generated paths are always inside the workspace; never trust otherwise.
-		return "", fmt.Errorf("%w: target is outside the workspace", ErrAsset)
+		return "", 0, fmt.Errorf("%w: target is outside the workspace", ErrAsset)
 	}
 	src, err := r.resolver.Resolve(ctx, asset.AssetID, meta)
 	if err != nil {
-		return "", fmt.Errorf("%w: %v", ErrAsset, err)
+		return "", 0, fmt.Errorf("%w: %w", ErrAsset, err)
 	}
 	defer src.Close()
+	data, err := readAsset(ctx, src, r.cfg.MaxAssetBytes)
+	if err != nil {
+		return "", 0, err
+	}
+	if err := validateImageContent(asset.MediaType, data, r.cfg.MaxAssetPixels); err != nil {
+		return "", 0, err
+	}
 	dst, err := os.OpenFile(target, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o400)
 	if err != nil {
-		return "", fmt.Errorf("create asset file in workspace: %w", err)
+		return "", 0, fmt.Errorf("%w: create asset file in workspace: %v", ErrAsset, pathOnly(err))
 	}
-	sum, err := copyHash(ctx, dst, src, r.cfg.MaxAssetBytes)
-	if cerr := dst.Close(); cerr != nil && err == nil {
-		err = fmt.Errorf("close asset file in workspace: %w", cerr)
+	_, writeErr := dst.Write(data)
+	if writeErr == nil {
+		writeErr = dst.Sync()
 	}
-	if err != nil {
-		return "", err
+	if cerr := dst.Close(); cerr != nil && writeErr == nil {
+		writeErr = cerr
 	}
-	return hex.EncodeToString(sum), nil
+	if writeErr != nil {
+		_ = os.Remove(target)
+		return "", 0, fmt.Errorf("%w: write asset file in workspace: %v", ErrAsset, pathOnly(writeErr))
+	}
+	sum := sha256.Sum256(data)
+	return hex.EncodeToString(sum[:]), int64(len(data)), nil
+}
+
+// readAsset reads one asset with a hard byte limit while honoring ctx.
+func readAsset(ctx context.Context, src io.Reader, limit int64) ([]byte, error) {
+	var out bytes.Buffer
+	buf := make([]byte, 64<<10)
+	var total int64
+	for {
+		if err := ctx.Err(); err != nil {
+			return nil, fmt.Errorf("%w: read asset: %w", ErrAsset, err)
+		}
+		n, rerr := src.Read(buf)
+		if n > 0 {
+			total += int64(n)
+			if total > limit {
+				return nil, fmt.Errorf("%w: limit is %d bytes", ErrAssetTooLarge, limit)
+			}
+			out.Write(buf[:n])
+		}
+		if errors.Is(rerr, io.EOF) {
+			return out.Bytes(), nil
+		}
+		if rerr != nil {
+			if cerr := ctx.Err(); cerr != nil {
+				return nil, fmt.Errorf("%w: read asset: %w", ErrAsset, cerr)
+			}
+			return nil, fmt.Errorf("%w: read asset: %v", ErrAsset, rerr)
+		}
+	}
 }
 
 // optionMeasure is one option group the template measured in the measure pass.
@@ -256,6 +323,10 @@ func (r *TypstRenderer) typstArgs(command string, args ...string) []string {
 		"--root", ".",
 		"--package-path", WorkspaceNoPackages,
 		"--package-cache-path", WorkspacePackages,
+		"--font-path", r.cfg.FontDir,
+		"--ignore-system-fonts",
+		"--creation-timestamp", creationTimestamp,
+		"--jobs", "1",
 		"--diagnostic-format", "short",
 	}, args...)
 }
@@ -268,7 +339,7 @@ func (r *TypstRenderer) compile(ctx context.Context, ws string, payload *RenderP
 	if err != nil {
 		return nil, err
 	}
-	if text := boundedText(stderr); text != "" {
+	if text := scrub(ws, boundedText(stderr)); text != "" {
 		warnings = append(warnings, RenderWarning{Code: "typst_diagnostic", Path: TemplateEntry, Message: text})
 	}
 	data, err := readPDF(filepath.Join(ws, OutputFile), DefaultOutputLimit)

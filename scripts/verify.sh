@@ -32,15 +32,18 @@ if [[ "${1:-}" == "--offline-only" ]]; then
 fi
 
 # ── Toolchain ────────────────────────────────────────────────────────────────
-for tool in typst mutool pdftotext pdfinfo; do
+for tool in typst prlimit mutool pdftotext pdfinfo staticcheck; do
   command -v "$tool" >/dev/null 2>&1 || fail "required executable not found: $tool"
 done
-typst fonts 2>/dev/null | grep -q "Noto Sans CJK SC" || fail "required font not found: Noto Sans CJK SC"
+typst --version 2>/dev/null | grep -q '^typst 0\.15\.' || fail "Typst 0.15.x is required"
+typst fonts --font-path third_party/fonts --ignore-system-fonts 2>/dev/null |
+  grep -qx 'Noto Sans CJK SC' || fail "vendored font not found: Noto Sans CJK SC"
 
 # ── Go checks ────────────────────────────────────────────────────────────────
 unformatted="$(gofmt -l internal cmd)"
 [[ -z "$unformatted" ]] || fail "gofmt: not formatted: $unformatted"
 go vet ./...
+staticcheck ./...
 go test -race -count=1 ./...
 go run ./cmd/ircheck -schema schemas/exam-ir-v1.json -dir testdata/golden/ir
 go run ./cmd/ircheck -schema schemas/layout-spec-v1.json -dir testdata/golden/layout
@@ -55,6 +58,9 @@ go run ./cmd/examrender -check \
 
 # ── Representative renders, online and with the network cut ──────────────────
 render_one student
+cp "$tmpdir/student.pdf" "$tmpdir/student-first.pdf"
+render_one student
+cmp -s "$tmpdir/student-first.pdf" "$tmpdir/student.pdf" || fail "identical inputs produced different PDF bytes"
 render_one teacher
 
 if command -v unshare >/dev/null 2>&1 && unshare -r -n true 2>/dev/null; then

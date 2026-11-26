@@ -26,6 +26,11 @@ func main() {
 		fmt.Fprintf(os.Stderr, "input path %q is not a directory\n", *dir)
 		os.Exit(2)
 	}
+	validator, err := ir.NewSchemaValidator(*schema)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "compile schema %q: %v\n", *schema, err)
+		os.Exit(2)
+	}
 	files := 0
 	failed := false
 	err = filepath.WalkDir(*dir, func(path string, entry os.DirEntry, walkErr error) error {
@@ -38,7 +43,11 @@ func main() {
 			return nil
 		}
 		files++
-		if err := ir.ValidateFile(*schema, path); err != nil {
+		data, readErr := os.ReadFile(path)
+		if readErr != nil {
+			fmt.Fprintf(os.Stderr, "INVALID %s: %v\n", path, readErr)
+			failed = true
+		} else if err := validator.Validate(data); err != nil {
 			fmt.Fprintf(os.Stderr, "INVALID %s: %v\n", path, err)
 			failed = true
 		} else {

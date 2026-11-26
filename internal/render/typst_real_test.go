@@ -106,20 +106,6 @@ func pdfWords(t *testing.T, path string) [][]wordBox {
 	return pages
 }
 
-// optionLabels finds the A./B./C./D. label words of one question on a page.
-func optionLabels(words []wordBox) map[string]wordBox {
-	out := map[string]wordBox{}
-	for _, w := range words {
-		switch w.text {
-		case "A.", "B.", "C.", "D.", "E.":
-			if _, seen := out[w.text]; !seen {
-				out[w.text] = w
-			}
-		}
-	}
-	return out
-}
-
 // assertGrid checks the option labels of one question form the expected
 // uniform grid: same-row labels share a y, columns are ordered left to right,
 // and rows fill completely before the next row starts.
@@ -586,34 +572,23 @@ func TestRenderOffline(t *testing.T) {
 	}
 }
 
-// TestRenderRepeatStable asserts repeated identical renders agree on every
-// structural fact (page count, size, text), ignoring PDF creation timestamps.
+// TestRenderRepeatStable asserts repeated identical renders are byte-for-byte
+// identical, not merely structurally alike.
 func TestRenderRepeatStable(t *testing.T) {
 	requireTypst(t)
-	requireTool(t, "pdftotext")
-	requireTool(t, "pdfinfo")
 	exam := loadIR(t, testGoldenIR)
 	layout := loadLayout(t, testGoldenLayout+"/student.json")
 	r := newRenderer(t, nil)
-	var texts []string
-	var pageCount int
-	var sizes [][2]float64
-	for i := 0; i < 2; i++ {
-		art, err := r.Render(context.Background(), exam, layout)
-		if err != nil {
-			t.Fatal(err)
-		}
-		path := pdfFile(t, art)
-		texts = append(texts, pdfText(t, path))
-		n, s := pdfPages(t, path)
-		if i == 0 {
-			pageCount, sizes = n, s
-		} else if n != pageCount || len(s) != len(sizes) {
-			t.Errorf("repeat render page structure differs: %d/%v vs %d/%v", n, s, pageCount, sizes)
-		}
+	a, err := r.Render(context.Background(), exam, layout)
+	if err != nil {
+		t.Fatal(err)
 	}
-	if texts[0] != texts[1] {
-		t.Error("repeat render text differs")
+	b, err := r.Render(context.Background(), exam, layout)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(a.Bytes, b.Bytes) {
+		t.Errorf("repeat renders differ: %d vs %d bytes (creation timestamp must be pinned)", len(a.Bytes), len(b.Bytes))
 	}
 }
 

@@ -1,5 +1,10 @@
 package ir
 
+import (
+	"encoding/json"
+	"errors"
+)
+
 type ExamDocumentIR struct {
 	SchemaVersion string           `json:"schema_version"`
 	ExamID        string           `json:"exam_id"`
@@ -53,8 +58,35 @@ type TableCell struct {
 }
 
 type Table struct {
-	Headers any           `json:"headers"`
+	Headers TableHeaders  `json:"headers"`
 	Rows    [][]TableCell `json:"rows"`
+}
+
+// TableHeaders normalizes the two exchange shapes into rows at decode time:
+// one flat row of cells or several rows. The typed Go surface is always rows,
+// so renderer code never switches on `any`.
+type TableHeaders [][]TableCell
+
+func (h *TableHeaders) UnmarshalJSON(data []byte) error {
+	var nested [][]TableCell
+	if err := json.Unmarshal(data, &nested); err == nil {
+		*h = TableHeaders(nested)
+		return nil
+	}
+	var flat []TableCell
+	if err := json.Unmarshal(data, &flat); err != nil {
+		return errors.New("headers must be a row of cells or a list of rows")
+	}
+	if len(flat) == 0 {
+		*h = nil
+		return nil
+	}
+	*h = TableHeaders{flat}
+	return nil
+}
+
+func (h TableHeaders) MarshalJSON() ([]byte, error) {
+	return json.Marshal([][]TableCell(h))
 }
 
 type Answer struct {

@@ -37,15 +37,6 @@ func layoutFor(row truthRow) ir.LayoutSpec {
 	}
 }
 
-// tokenTypes flattens a token list into its type sequence for assertions.
-func tokenTypes(tokens []inline.Token) []string {
-	out := make([]string, 0, len(tokens))
-	for _, t := range tokens {
-		out = append(out, t.Type)
-	}
-	return out
-}
-
 // findToken returns the first token of a type, or nil.
 func findToken(tokens []inline.Token, typ string) *inline.Token {
 	for i := range tokens {
@@ -215,6 +206,28 @@ func TestPrecompileTokenizesEveryTextField(t *testing.T) {
 		}
 		i++
 	})
+}
+
+// TestPrecompileTitleAndDisplayLabel asserts title/subtitle are tokenized and
+// question numbering is display-ready without template punctuation logic.
+func TestPrecompileTitleAndDisplayLabel(t *testing.T) {
+	exam := minimalExam(ir.ContentBlock{Type: "text", Markdown: "题干"})
+	exam.Metadata.Title = "函数 $f(x)$ 综合卷"
+	exam.Metadata.Subtitle = "副标题"
+	exam.Questions[0].DisplayNumber = "一、"
+	payload, err := Precompile(exam, layoutFor(truthRow{ModeStudent, false, false}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if findToken(payload.Exam.Title.Tokens, inline.TypeMath) == nil {
+		t.Errorf("title was not tokenized: %+v", payload.Exam.Title.Tokens)
+	}
+	if len(payload.Exam.Subtitle.Tokens) == 0 || payload.Exam.Subtitle.Tokens[0].Text != "副标题" {
+		t.Errorf("subtitle was not tokenized: %+v", payload.Exam.Subtitle.Tokens)
+	}
+	if got := payload.Exam.Questions[0].DisplayLabel; got != "一、" {
+		t.Errorf("display_label = %q, want 一、 (no appended dot)", got)
+	}
 }
 
 // TestPrecompileBlankAndStyles asserts markup survives into payload tokens.
@@ -509,6 +522,21 @@ func TestChooseOptionGrid(t *testing.T) {
 }
 
 // TestBuildTableGrid covers span placement, hole padding and overlap errors.
+func FuzzBuildTableGrid(f *testing.F) {
+	f.Add("a", 1, 1)
+	f.Add("span", 64, 512)
+	f.Add("bomb", 1_000_000, 1)
+	f.Fuzz(func(t *testing.T, text string, colSpan, rowSpan int) {
+		if len(text) > 128 {
+			text = text[:128]
+		}
+		_, _ = buildTableGrid(ir.Table{
+			Headers: ir.TableHeaders{{{Text: text, ColSpan: colSpan, RowSpan: rowSpan}}},
+			Rows:    [][]ir.TableCell{{{Text: text}}},
+		})
+	})
+}
+
 func TestBuildTableGrid(t *testing.T) {
 	t.Run("golden spans", func(t *testing.T) {
 		exam := loadIR(t, testGoldenIR)
@@ -526,7 +554,7 @@ func TestBuildTableGrid(t *testing.T) {
 	})
 	t.Run("ragged hole padded", func(t *testing.T) {
 		grid, err := buildTableGrid(ir.Table{
-			Headers: [][]ir.TableCell{{{Text: "a", ColSpan: 2}, {Text: "b"}}},
+			Headers: ir.TableHeaders{{{Text: "a", ColSpan: 2}, {Text: "b"}}},
 			Rows:    [][]ir.TableCell{{{Text: "c"}}},
 		})
 		if err != nil {
@@ -544,7 +572,7 @@ func TestBuildTableGrid(t *testing.T) {
 		// Row 1: c (colspan 2) starts at the first free slot, col 0, and its
 		// span reaches col 1, which b's rowspan occupies: impossible grid.
 		_, err := buildTableGrid(ir.Table{
-			Headers: [][]ir.TableCell{{{Text: "a"}, {Text: "b", RowSpan: 2}}},
+			Headers: ir.TableHeaders{{{Text: "a"}, {Text: "b", RowSpan: 2}}},
 			Rows:    [][]ir.TableCell{{{Text: "c", ColSpan: 2}}},
 		})
 		if err == nil {

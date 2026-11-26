@@ -116,6 +116,40 @@ func TestCLICheckOnly(t *testing.T) {
 	}
 }
 
+func TestWriteAtomicPermissions(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "out.pdf")
+	if err := writeAtomic(path, []byte("%PDF-1.7\n")); err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := info.Mode().Perm(); got != 0o644 {
+		t.Errorf("output mode = %o, want 644", got)
+	}
+}
+
+func TestCheckDistinctResolvesSymlinks(t *testing.T) {
+	dir := t.TempDir()
+	input := filepath.Join(dir, "input.json")
+	if err := os.WriteFile(input, []byte("{}"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	out := filepath.Join(dir, "out.pdf")
+	if err := os.Symlink(input, out); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	manifest := filepath.Join(dir, "manifest.json")
+	if err := os.WriteFile(manifest, []byte("{}"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	err := checkDistinct(input, manifest, dir, out)
+	if err == nil || !strings.Contains(err.Error(), "overwrite") {
+		t.Fatalf("err = %v, want overwrite rejection", err)
+	}
+}
+
 // TestCLIAtomicOutput asserts a failed render leaves no output or temp file.
 func TestCLIAtomicOutput(t *testing.T) {
 	requireTypst(t)

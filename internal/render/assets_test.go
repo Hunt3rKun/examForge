@@ -273,6 +273,7 @@ func TestRenderAssetDedupAndHash(t *testing.T) {
 // copied bytes, their SHA-256 in the payload, and that the staged package
 // cache is itself a valid vendored cache root.
 func TestRenderAssetHashInWorkspace(t *testing.T) {
+	requireTypst(t)
 	exam := loadIR(t, "../../testdata/render/ir/options.json")
 	layout := loadLayout(t, "../../testdata/render/layouts/measure-a4-1col.json")
 	data, err := os.ReadFile("../../testdata/golden/assets/sample_fig.png")
@@ -350,6 +351,78 @@ func TestCopyHashLimitAndCancel(t *testing.T) {
 	cancel()
 	if _, err := copyHash(ctx, &dst, strings.NewReader(data), 2000); !errors.Is(err, context.Canceled) {
 		t.Errorf("canceled copy: err = %v, want context.Canceled", err)
+	}
+}
+
+// TestValidateImageContent rejects MIME/content mismatches and oversized
+// decodes before the bytes reach Typst.
+func TestValidateImageContent(t *testing.T) {
+	png, err := os.ReadFile("../../testdata/golden/assets/sample_fig.png")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := validateImageContent("image/png", png, DefaultMaxAssetPixels); err != nil {
+		t.Fatalf("valid PNG rejected: %v", err)
+	}
+	if err := validateImageContent("image/jpeg", png, DefaultMaxAssetPixels); !errors.Is(err, ErrAsset) {
+		t.Errorf("PNG declared as JPEG: err = %v, want ErrAsset", err)
+	}
+	if err := validateImageContent("image/png", png, 1); !errors.Is(err, ErrAssetTooLarge) {
+		t.Errorf("pixel limit: err = %v, want ErrAssetTooLarge", err)
+	}
+	if err := validateImageContent("image/png", []byte("not an image"), DefaultMaxAssetPixels); !errors.Is(err, ErrAsset) {
+		t.Errorf("garbage image: err = %v, want ErrAsset", err)
+	}
+	if err := validateImageContent("image/svg+xml", []byte(`<svg xmlns="http://www.w3.org/2000/svg"><rect/></svg>`), DefaultMaxAssetPixels); err != nil {
+		t.Errorf("valid SVG rejected: %v", err)
+	}
+	if err := validateImageContent("image/svg+xml", []byte(`<!DOCTYPE svg><svg/>`), DefaultMaxAssetPixels); !errors.Is(err, ErrAsset) {
+		t.Errorf("SVG DOCTYPE: err = %v, want ErrAsset", err)
+	}
+	webp := make([]byte, 30)
+	copy(webp[0:], "RIFF")
+	copy(webp[8:], "WEBP")
+	copy(webp[12:], "VP8X")
+	// Canvas is (width-1, height-1) as little-endian 24-bit values.
+	webp[24], webp[25], webp[26] = 9, 0, 0
+	webp[27], webp[28], webp[29] = 19, 0, 0
+	if err := validateImageContent("image/webp", webp, 200); err != nil {
+		t.Errorf("valid WebP header rejected: %v", err)
+	}
+	if err := validateImageContent("image/webp", webp, 100); !errors.Is(err, ErrAssetTooLarge) {
+		t.Errorf("WebP pixel limit: err = %v, want ErrAssetTooLarge", err)
+	}
+}
+
+// TestRenderRejectsOversizedAssetTotal asserts the per-render asset budget.
+func TestRenderRejectsOversizedAssetTotal(t *testing.T) {
+	ft := newFakeTracker(t, "success")
+	exam := fakeExam()
+	idA := "ast_01jtest00000000000000000A"
+	idB := "ast_01jtest00000000000000000B"
+	exam.Assets = map[string]ir.Asset{
+		idA: {AssetID: idA, MediaType: "image/png", URI: "ignored", Status: "raw_cropped"},
+		idB: {AssetID: idB, MediaType: "image/png", URI: "ignored", Status: "raw_cropped"},
+	}
+	exam.Questions[0].Stem = append(exam.Questions[0].Stem,
+		ir.ContentBlock{Type: "image_ref", AssetID: idA, LayoutHint: "inline"},
+		ir.ContentBlock{Type: "image_ref", AssetID: idB, LayoutHint: "inline"})
+	png, err := os.ReadFile("../../testdata/golden/assets/sample_fig.png")
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := newFakeRenderer(t, "success", ft, func(cfg *TypstConfig) {
+		cfg.MaxTotalAssetBytes = int64(len(png) + 1)
+		cfg.AssetResolver = AssetResolverFunc(func(context.Context, string, ir.Asset) (io.ReadCloser, error) {
+			return io.NopCloser(strings.NewReader(string(png))), nil
+		})
+	})
+	_, err = r.Render(context.Background(), exam, fakeLayout())
+	if !errors.Is(err, ErrAssetTooLarge) {
+		t.Fatalf("err = %v, want ErrAssetTooLarge", err)
+	}
+	if ft.started.Load() != 0 {
+		t.Errorf("Typst started despite asset rejection")
 	}
 }
 

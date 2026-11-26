@@ -1,7 +1,6 @@
 package render
 
 import (
-	"encoding/json"
 	"errors"
 	"fmt"
 
@@ -29,9 +28,12 @@ func buildTableGrid(t ir.Table) (*gridLayout, error) {
 	rows := make([][]ir.TableCell, 0, len(headers)+len(t.Rows))
 	rows = append(rows, headers...)
 	rows = append(rows, t.Rows...)
+	if len(rows) > ir.MaxTableRows {
+		return nil, fmt.Errorf("table has %d rows; limit is %d", len(rows), ir.MaxTableRows)
+	}
 
 	type pos struct{ row, col int }
-	occupied := make(map[pos]bool)
+	occupied := make([]bool, len(rows)*ir.MaxTableColumns)
 	origin := make(map[pos]ir.TableCell)
 	columns := 0
 	for r, row := range rows {
@@ -48,15 +50,21 @@ func buildTableGrid(t ir.Table) (*gridLayout, error) {
 				rs = 1
 			}
 			cell.ColSpan, cell.RowSpan = cs, rs
+			if cs > ir.MaxTableColumns || rs > ir.MaxTableRows {
+				return nil, fmt.Errorf("cell %q span %dx%d exceeds limits %dx%d", cell.Text, cs, rs, ir.MaxTableColumns, ir.MaxTableRows)
+			}
 			if r+rs > len(rows) {
 				return nil, fmt.Errorf("cell %q spans %d row(s) but only %d row(s) remain", cell.Text, rs, len(rows)-r)
 			}
-			for occupied[pos{r, col}] {
+			for col < ir.MaxTableColumns && occupied[r*ir.MaxTableColumns+col] {
 				col++
+			}
+			if col+cs > ir.MaxTableColumns {
+				return nil, fmt.Errorf("cell %q at row %d exceeds %d columns", cell.Text, r, ir.MaxTableColumns)
 			}
 			for dr := 0; dr < rs; dr++ {
 				for dc := 0; dc < cs; dc++ {
-					at := pos{r + dr, col + dc}
+					at := (r+dr)*ir.MaxTableColumns + col + dc
 					if occupied[at] {
 						return nil, fmt.Errorf("cell %q at row %d col %d overlaps a cell spanning into it", cell.Text, r, col)
 					}
@@ -80,7 +88,7 @@ func buildTableGrid(t ir.Table) (*gridLayout, error) {
 			at := pos{r, col}
 			if cell, ok := origin[at]; ok {
 				out.Rows[r] = append(out.Rows[r], cell)
-			} else if !occupied[at] {
+			} else if !occupied[r*ir.MaxTableColumns+col] {
 				// A ragged hole becomes an explicit empty cell. A slot covered
 				// by a span is omitted: Typst's table skips it.
 				out.Rows[r] = append(out.Rows[r], ir.TableCell{ColSpan: 1, RowSpan: 1})
@@ -90,76 +98,8 @@ func buildTableGrid(t ir.Table) (*gridLayout, error) {
 	return out, nil
 }
 
-// tableHeaderRows normalizes the two schema shapes of table headers, one flat
-// row of cells or several rows, into a list of rows. It accepts both the
-// JSON-decoded and the typed Go shape.
-func tableHeaderRows(headers any) ([][]ir.TableCell, error) {
-	switch h := headers.(type) {
-	case nil:
-		return nil, nil
-	case []ir.TableCell:
-		return [][]ir.TableCell{h}, nil
-	case [][]ir.TableCell:
-		return h, nil
-	case []any:
-		if len(h) == 0 {
-			return nil, nil
-		}
-		if _, ok := toCell(h[0]); ok {
-			row, err := headerRow(h)
-			if err != nil {
-				return nil, err
-			}
-			return [][]ir.TableCell{row}, nil
-		}
-		rows := make([][]ir.TableCell, 0, len(h))
-		for i, item := range h {
-			if typed, ok := item.([]ir.TableCell); ok {
-				rows = append(rows, typed)
-				continue
-			}
-			items, ok := item.([]any)
-			if !ok {
-				return nil, fmt.Errorf("headers[%d] is neither a cell nor a row of cells", i)
-			}
-			row, err := headerRow(items)
-			if err != nil {
-				return nil, fmt.Errorf("headers[%d]: %w", i, err)
-			}
-			rows = append(rows, row)
-		}
-		return rows, nil
-	}
-	return nil, errors.New("headers must be a row of cells or a list of rows")
-}
-
-func headerRow(items []any) ([]ir.TableCell, error) {
-	row := make([]ir.TableCell, 0, len(items))
-	for i, item := range items {
-		cell, ok := toCell(item)
-		if !ok {
-			return nil, fmt.Errorf("item %d is not a table cell", i)
-		}
-		row = append(row, cell)
-	}
-	return row, nil
-}
-
-// toCell converts one decoded cell into the typed DTO.
-func toCell(v any) (ir.TableCell, bool) {
-	switch c := v.(type) {
-	case ir.TableCell:
-		return c, true
-	case map[string]any:
-		data, err := json.Marshal(c)
-		if err != nil {
-			return ir.TableCell{}, false
-		}
-		var cell ir.TableCell
-		if err := json.Unmarshal(data, &cell); err != nil {
-			return ir.TableCell{}, false
-		}
-		return cell, true
-	}
-	return ir.TableCell{}, false
+// tableHeaderRows returns the normalized header rows. Decode-time
+// TableHeaders.UnmarshalJSON already accepted both exchange shapes.
+func tableHeaderRows(headers ir.TableHeaders) ([][]ir.TableCell, error) {
+	return headers, nil
 }

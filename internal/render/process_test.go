@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -294,6 +295,55 @@ func TestRenderCancelMidRun(t *testing.T) {
 	}
 }
 
+// TestRenderQueueTimeout asserts waiting for a slot is bounded by the renderer
+// deadline and is reported distinctly from a caller cancellation.
+func TestRenderQueueTimeout(t *testing.T) {
+	ft := newFakeTracker(t, "hang")
+	r := newFakeRenderer(t, "hang", ft, func(cfg *TypstConfig) {
+		cfg.MaxConcurrent = 1
+		cfg.Timeout = 200 * time.Millisecond
+	})
+	holderCtx, holderCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer holderCancel()
+	holderDone := make(chan error, 1)
+	go func() { _, err := r.Render(holderCtx, fakeExam(), fakeLayout()); holderDone <- err }()
+	deadline := time.Now().Add(5 * time.Second)
+	for ft.started.Load() == 0 {
+		if time.Now().After(deadline) {
+			t.Fatal("holder never started")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	_, err := r.Render(context.Background(), fakeExam(), fakeLayout())
+	if !errors.Is(err, ErrQueueTimeout) || !errors.Is(err, ErrRenderTimeout) {
+		t.Fatalf("err = %v, want ErrQueueTimeout and ErrRenderTimeout", err)
+	}
+	if ft.started.Load() != 1 {
+		t.Errorf("waiter started a process; started = %d", ft.started.Load())
+	}
+	holderCancel()
+	<-holderDone
+}
+
+// TestChildEnvWhitelist asserts unrelated host variables and credentials never
+// reach the Typst process.
+func TestChildEnvWhitelist(t *testing.T) {
+	t.Setenv("EXAMFORGE_FAKE_SECRET", "super-secret")
+	t.Setenv("AWS_SECRET_ACCESS_KEY", "also-secret")
+	t.Setenv("TYPST_PACKAGE_PATH", "/host/packages")
+	env := childEnv()
+	for _, kv := range env {
+		name, _, _ := strings.Cut(kv, "=")
+		switch name {
+		case "EXAMFORGE_FAKE_SECRET", "AWS_SECRET_ACCESS_KEY", "TYPST_PACKAGE_PATH":
+			t.Errorf("sensitive or Typst variable leaked: %s", name)
+		}
+	}
+	if !slices.Contains(env, "SOURCE_DATE_EPOCH=0") {
+		t.Error("SOURCE_DATE_EPOCH is not pinned")
+	}
+}
+
 // TestRenderDefaultTimeout asserts the renderer's own deadline is reported as
 // ErrRenderTimeout, distinct from a caller deadline.
 func TestRenderDefaultTimeout(t *testing.T) {
@@ -413,6 +463,26 @@ func TestRenderAssetFailureCleanup(t *testing.T) {
 	}
 	if ft.started.Load() != 0 {
 		t.Errorf("started %d processes after asset failure, want 0", ft.started.Load())
+	}
+}
+
+// TestRenderAssetErrorChain asserts resolver causes remain inspectable through
+// the renderer's asset error wrapper.
+func TestRenderAssetErrorChain(t *testing.T) {
+	ft := newFakeTracker(t, "success")
+	exam := fakeExam()
+	exam.Assets = map[string]ir.Asset{testAssetID: testAsset()}
+	exam.Questions[0].Stem = append(exam.Questions[0].Stem,
+		ir.ContentBlock{Type: "image_ref", AssetID: testAssetID, LayoutHint: "inline"})
+	cause := errors.New("backend unavailable")
+	r := newFakeRenderer(t, "success", ft, func(cfg *TypstConfig) {
+		cfg.AssetResolver = AssetResolverFunc(func(context.Context, string, ir.Asset) (io.ReadCloser, error) {
+			return nil, cause
+		})
+	})
+	_, err := r.Render(context.Background(), exam, fakeLayout())
+	if !errors.Is(err, ErrAsset) || !errors.Is(err, cause) {
+		t.Fatalf("err = %v, want both ErrAsset and the resolver cause", err)
 	}
 }
 

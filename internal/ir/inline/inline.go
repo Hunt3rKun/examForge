@@ -140,11 +140,19 @@ func (p *parser) diag(code string, i, j int, format string, args ...any) {
 	})
 }
 
-// emitAs appends a token of the given type holding the pending text. It always
-// emits, so an empty styled segment stays visible as an empty style token.
+// emitAs appends a token holding the pending text. Callers decide whether an
+// empty segment is meaningful; style segments around math use emitStyleText.
 func (p *parser) emitAs(typ string) {
 	p.res.Tokens = append(p.res.Tokens, Token{Type: typ, Text: p.buf.String()})
 	p.buf.Reset()
+}
+
+// emitStyleText drops empty style fragments around inline math. Besides being
+// redundant, an empty Text is omitted from JSON and must not reach the template.
+func (p *parser) emitStyleText(typ string) {
+	if p.buf.Len() > 0 {
+		p.emitAs(typ)
+	}
 }
 
 // flush appends the pending plain text as one token unless it is empty.
@@ -309,7 +317,7 @@ func (p *parser) emitStyleSpan(i, l, closer int, typ string) {
 				p.diag(DiagEmptySpan, k, m+1, "empty math span %q kept as text", s[k:m+1])
 				p.buf.WriteString(s[k : m+1])
 			} else {
-				p.emitAs(typ)
+				p.emitStyleText(typ)
 				p.res.Tokens = append(p.res.Tokens, Token{Type: TypeMath, Text: s[k+1 : m]})
 			}
 			k = m + 1
@@ -319,7 +327,7 @@ func (p *parser) emitStyleSpan(i, l, closer int, typ string) {
 			k += w
 		}
 	}
-	p.emitAs(typ)
+	p.emitStyleText(typ)
 }
 
 // blank handles a candidate at i that starts with "{{blank:". Only

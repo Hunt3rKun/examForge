@@ -49,6 +49,9 @@ var (
 	// ErrRenderTimeout is the cause of a deadline that this renderer added
 	// because the caller passed a context without one.
 	ErrRenderTimeout = errors.New("render timeout")
+	// ErrQueueTimeout reports that a render's bounded deadline expired while
+	// waiting for a concurrency slot, before any subprocess started.
+	ErrQueueTimeout = errors.New("render queue timeout")
 )
 
 // AssetResolver locates asset content by ID. Implementations must not trust the

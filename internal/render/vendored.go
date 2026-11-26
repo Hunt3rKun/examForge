@@ -120,12 +120,12 @@ func stageFile(src, rel, want, dst string) error {
 	if dst != "" {
 		target := filepath.Join(dst, filepath.FromSlash(rel))
 		if err := os.MkdirAll(filepath.Dir(target), 0o700); err != nil {
-			return fmt.Errorf("stage %s into workspace: %w", rel, err)
+			return fmt.Errorf("%w: stage %s into workspace: %v", ErrPackage, rel, pathOnly(err))
 		}
 		// Read-only: every workspace gets its own immutable copy.
 		out, err = os.OpenFile(target, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o400)
 		if err != nil {
-			return fmt.Errorf("stage %s into workspace: %w", rel, err)
+			return fmt.Errorf("%w: stage %s into workspace: %v", ErrPackage, rel, pathOnly(err))
 		}
 		sink = out
 	}

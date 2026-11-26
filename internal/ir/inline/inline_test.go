@@ -73,7 +73,10 @@ var cases = []struct {
 	{"lone star is unclosed italic", "*", []Token{T("*")}, []Diagnostic{d(DiagUnclosedItalic, 0, 1)}},
 
 	// Math inside a style interrupts the style token.
-	{"math in style trailing", "**已知 $a_n = 1$**", []Token{B("已知 "), M("a_n = 1"), B("")}, nil},
+	{"math in style trailing", "**已知 $a_n = 1$**", []Token{B("已知 "), M("a_n = 1")}, nil},
+	{"math only in style", "**$x$**", []Token{M("x")}, nil},
+	{"math starts italic", "*$a$b*", []Token{M("a"), I("b")}, nil},
+	{"math ends underline", "__a$x$__", []Token{U("a"), M("x")}, nil},
 	{"math in style middle", "**x $y$ z**", []Token{B("x "), M("y"), B(" z")}, nil},
 	{"two math in style", "*a $x$ b $y$ c*", []Token{I("a "), M("x"), I(" b "), M("y"), I(" c")}, nil},
 	{"math protects style delimiter", "*x $a*b$ y*", []Token{I("x "), M("a*b"), I(" y")}, nil},
@@ -137,8 +140,8 @@ func TestParse(t *testing.T) {
 				}
 			}
 			for _, tok := range got.Tokens {
-				if tok.Type == TypeText && tok.Text == "" {
-					t.Errorf("empty text token emitted")
+				if tok.Type != TypeBlank && tok.Text == "" {
+					t.Errorf("empty %s token emitted", tok.Type)
 				}
 			}
 			// Deterministic: the same input yields the identical result.
@@ -254,6 +257,9 @@ func roundTrip(tokens []Token) string {
 // leading zeros.
 var noRoundTrip = map[string]bool{
 	"math in style trailing":        true,
+	"math only in style":            true,
+	"math starts italic":            true,
+	"math ends underline":           true,
 	"math in style middle":          true,
 	"two math in style":             true,
 	"math protects style delimiter": true,
@@ -302,8 +308,8 @@ func FuzzParse(f *testing.F) {
 				if tok.Index != 0 {
 					t.Fatalf("token %d: index set on %s", i, tok.Type)
 				}
-				if tok.Type == TypeText && tok.Text == "" {
-					t.Fatalf("token %d: empty text token", i)
+				if tok.Text == "" {
+					t.Fatalf("token %d: empty %s token", i, tok.Type)
 				}
 			case TypeBlank:
 				if tok.Index < 1 || tok.Text != "" {

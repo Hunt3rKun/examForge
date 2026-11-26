@@ -23,11 +23,12 @@
 
 #let render-inline(tokens) = {
   for token in tokens {
-    if token.type == "text" { token.text }
-    else if token.type == "math_inline" { mi(token.text) }
-    else if token.type == "bold" { strong(token.text) }
-    else if token.type == "italic" { emph(token.text) }
-    else if token.type == "underline" { underline(token.text) }
+    let t = token.at("text", default: "")
+    if token.type == "text" { t }
+    else if token.type == "math_inline" { mi(t) }
+    else if token.type == "bold" { strong(t) }
+    else if token.type == "italic" { emph(t) }
+    else if token.type == "underline" { underline(t) }
     else if token.type == "blank" { answer-blank(token.index) }
   }
 }
@@ -128,14 +129,14 @@
 
 // number-label and number-indent are shared by the measure and render passes,
 // so the measured width is the width the options really get.
-#let number-label(q) = if q.display_number == "" { none } else { strong([#q.display_number.]) }
+#let number-label(q) = if q.display_label == "" { none } else { strong(q.display_label) }
 // Absolute on purpose: widths must stay single-unit lengths to become numbers.
 #let number-gap = 5pt
 #let number-indent(q) = if number-label(q) == none { 0pt } else { measure(number-label(q)).width + number-gap }
 
 // A label keeps its own punctuation; a bare "A" becomes "A.".
 #let label-punctuation(label) = {
-  let flat = label.tokens.map(t => t.text).join()
+  let flat = label.tokens.map(t => t.at("text", default: "")).join(default: "")
   if flat == "" or not alnum.contains(flat.clusters().last()) { "" } else { "." }
 }
 
@@ -242,11 +243,11 @@
 // ── Document ────────────────────────────────────────────────────────────────
 #let title-block() = block(above: 0pt, below: 4mm)[
   #align(center)[
-    #text(size: 18pt, weight: "bold")[#exam.title]
-    #if exam.at("subtitle", default: none) != none [
+    #text(size: 18pt, weight: "bold", render-inline(exam.title.tokens))
+    #if exam.subtitle.tokens.len() > 0 [
       #v(0.4em)
       #linebreak()
-      #text(size: 12pt)[#exam.subtitle]
+      #text(size: 12pt, render-inline(exam.subtitle.tokens))
     ]
   ]
 ]

@@ -1,8 +1,10 @@
 package ir
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -49,6 +51,34 @@ func TestInvalidExamIRRejected(t *testing.T) {
 				t.Fatal("expected schema validation failure")
 			}
 		})
+	}
+}
+
+func TestTableHeadersNormalizeBothShapes(t *testing.T) {
+	for _, raw := range []string{
+		`[{"text":"A"},{"text":"B"}]`,
+		`[[{"text":"A"},{"text":"B"}]]`,
+	} {
+		var table Table
+		if err := json.Unmarshal([]byte(`{"headers":`+raw+`,"rows":[]}`), &table); err != nil {
+			t.Fatalf("%s: %v", raw, err)
+		}
+		if len(table.Headers) != 1 || len(table.Headers[0]) != 2 || table.Headers[0][1].Text != "B" {
+			t.Errorf("%s normalized to %+v, want one row of two cells", raw, table.Headers)
+		}
+	}
+}
+
+func TestDecodeExamIRRejectsOversizedInput(t *testing.T) {
+	v, err := NewValidator(
+		filepath.Join("..", "..", "schemas", "exam-ir-v1.json"),
+		filepath.Join("..", "..", "schemas", "layout-spec-v1.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = v.DecodeExamIR(strings.NewReader(strings.Repeat(" ", MaxExamBytes+1)))
+	if err == nil || !strings.Contains(err.Error(), "limit") {
+		t.Fatalf("err = %v, want size limit", err)
 	}
 }
 

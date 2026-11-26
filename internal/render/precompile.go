@@ -5,6 +5,9 @@ import (
 	"fmt"
 	"math"
 	"sort"
+	"strings"
+	"unicode"
+	"unicode/utf8"
 
 	"examforge/internal/ir"
 	"examforge/internal/ir/inline"
@@ -29,6 +32,16 @@ func Precompile(exam ir.ExamDocumentIR, layout ir.LayoutSpec) (*RenderPayload, e
 	if err := validateLayout(layout); err != nil {
 		return nil, err
 	}
+	if err := ir.ValidateExamSemantics(exam); err != nil {
+		return nil, fmt.Errorf("%w: %v", ErrInvalidInput, err)
+	}
+	data, err := json.Marshal(exam)
+	if err != nil {
+		return nil, fmt.Errorf("%w: encode Exam IR for size validation: %v", ErrInvalidInput, err)
+	}
+	if len(data) > ir.MaxExamBytes {
+		return nil, fmt.Errorf("%w: serialized Exam IR is %d bytes; limit is %d", ErrInvalidInput, len(data), ir.MaxExamBytes)
+	}
 	lay, err := newRenderLayout(layout)
 	if err != nil {
 		return nil, err
@@ -50,8 +63,8 @@ func Precompile(exam ir.ExamDocumentIR, layout ir.LayoutSpec) (*RenderPayload, e
 		Pass:    PassMeasure,
 		Exam: RenderExam{
 			ExamID:    exam.ExamID,
-			Title:     exam.Metadata.Title,
-			Subtitle:  exam.Metadata.Subtitle,
+			Title:     RenderInline{Tokens: c.tokenize(exam.Metadata.Title, "metadata.title")},
+			Subtitle:  RenderInline{Tokens: c.tokenize(exam.Metadata.Subtitle, "metadata.subtitle")},
 			Questions: []RenderQuestion{},
 		},
 		Layout: lay,
@@ -104,6 +117,7 @@ func (c *precompiler) question(q ir.QuestionItem, path string) (RenderQuestion, 
 		Index:           c.next,
 		Kind:            q.Kind,
 		DisplayNumber:   q.DisplayNumber,
+		DisplayLabel:    displayLabel(q.DisplayNumber),
 		Stem:            []RenderBlock{},
 		AnswerSpaceMM:   q.AnswerSpaceMM,
 		OptionRequested: c.lay.OptionLayout,
@@ -160,6 +174,21 @@ func (c *precompiler) question(q ir.QuestionItem, path string) (RenderQuestion, 
 		out.Children = append(out.Children, rc)
 	}
 	return out, nil
+}
+
+// displayLabel appends a full stop only to a number ending in an ASCII letter
+// or digit. Chinese numbering, existing punctuation and bracketed labels such
+// as 一、, （1） and ① are already complete.
+func displayLabel(number string) string {
+	number = strings.TrimSpace(number)
+	if number == "" {
+		return ""
+	}
+	last, _ := utf8.DecodeLastRuneInString(number)
+	if last <= unicode.MaxASCII && (unicode.IsLetter(last) || unicode.IsDigit(last)) {
+		return number + "."
+	}
+	return number
 }
 
 // assetList returns every referenced asset once, sorted by asset_id so the
@@ -307,21 +336,10 @@ func (c *precompiler) image(b ir.ContentBlock, path string, maxMM float64) (Rend
 			AssetID:   b.AssetID,
 			Path:      WorkspaceAssets + "/" + b.AssetID + "." + ext,
 			MediaType: asset.MediaType,
-			WidthMM:   clampWidth(asset.SuggestedWidthMM, c.lay),
 		}
 		c.assets[b.AssetID] = staged
 	}
 	return RenderBlock{Kind: BlockImage, AssetID: b.AssetID, Src: staged.Path, WidthMM: width}, nil
-}
-
-func clampWidth(suggested float64, lay RenderLayout) float64 {
-	if suggested <= 0 || math.IsNaN(suggested) || math.IsInf(suggested, 0) {
-		suggested = lay.DefaultImageWidthMM
-	}
-	if suggested > lay.MaxImageWidthMM {
-		suggested = lay.MaxImageWidthMM
-	}
-	return suggested
 }
 
 // table normalizes the IR table into a rectangular grid of tokenized cells.

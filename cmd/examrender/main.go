@@ -8,7 +8,6 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -52,11 +51,17 @@ func run() error {
 		return err
 	}
 
-	exam, err := loadExam(*schemaDir, *irPath)
+	validator, err := ir.NewValidator(
+		filepath.Join(*schemaDir, "exam-ir-v1.json"),
+		filepath.Join(*schemaDir, "layout-spec-v1.json"))
 	if err != nil {
 		return err
 	}
-	layout, err := loadLayout(*schemaDir, *layoutPath)
+	exam, err := loadExam(validator, *irPath)
+	if err != nil {
+		return err
+	}
+	layout, err := loadLayout(validator, *layoutPath)
 	if err != nil {
 		return err
 	}
@@ -68,6 +73,8 @@ func run() error {
 		TypstPath:     *typstPath,
 		TemplateDir:   *templateDir,
 		PackageDir:    *packageDir,
+		SchemaDir:     *schemaDir,
+		Validator:     validator,
 		Timeout:       *timeout,
 		AssetResolver: resolver,
 	})
@@ -104,15 +111,22 @@ func checkDistinct(irPath, layoutPath, assetsRoot, outPath string) error {
 	if outPath == "" {
 		return nil
 	}
+	outResolved, err := filepath.EvalSymlinks(outPath)
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("resolve output: %w", err)
+	}
 	outAbs, err := filepath.Abs(outPath)
 	if err != nil {
 		return err
 	}
+	if outResolved != "" {
+		outAbs = outResolved
+	}
 	inputs := []string{irPath, layoutPath, filepath.Join(assetsRoot, render.AssetManifestFile)}
 	for _, in := range inputs {
-		abs, err := filepath.Abs(in)
+		abs, err := filepath.EvalSymlinks(in)
 		if err != nil {
-			return err
+			return fmt.Errorf("resolve input %q: %w", in, err)
 		}
 		if abs == outAbs {
 			return fmt.Errorf("output %q would overwrite input %q", outPath, in)
@@ -121,34 +135,28 @@ func checkDistinct(irPath, layoutPath, assetsRoot, outPath string) error {
 	return nil
 }
 
-func loadExam(schemaDir, path string) (ir.ExamDocumentIR, error) {
-	schema := filepath.Join(schemaDir, "exam-ir-v1.json")
-	if err := ir.ValidateFile(schema, path); err != nil {
-		return ir.ExamDocumentIR{}, fmt.Errorf("exam IR: %w", err)
-	}
-	data, err := os.ReadFile(path)
+func loadExam(v *ir.Validator, path string) (ir.ExamDocumentIR, error) {
+	f, err := os.Open(path)
 	if err != nil {
 		return ir.ExamDocumentIR{}, err
 	}
-	var exam ir.ExamDocumentIR
-	if err := json.Unmarshal(data, &exam); err != nil {
-		return ir.ExamDocumentIR{}, fmt.Errorf("decode exam IR: %w", err)
+	defer f.Close()
+	exam, err := v.DecodeExamIR(f)
+	if err != nil {
+		return ir.ExamDocumentIR{}, fmt.Errorf("exam IR: %w", err)
 	}
 	return exam, nil
 }
 
-func loadLayout(schemaDir, path string) (ir.LayoutSpec, error) {
-	schema := filepath.Join(schemaDir, "layout-spec-v1.json")
-	if err := ir.ValidateFile(schema, path); err != nil {
-		return ir.LayoutSpec{}, fmt.Errorf("layout spec: %w", err)
-	}
-	data, err := os.ReadFile(path)
+func loadLayout(v *ir.Validator, path string) (ir.LayoutSpec, error) {
+	f, err := os.Open(path)
 	if err != nil {
 		return ir.LayoutSpec{}, err
 	}
-	var layout ir.LayoutSpec
-	if err := json.Unmarshal(data, &layout); err != nil {
-		return ir.LayoutSpec{}, fmt.Errorf("decode layout spec: %w", err)
+	defer f.Close()
+	layout, err := v.DecodeLayoutSpec(f)
+	if err != nil {
+		return ir.LayoutSpec{}, fmt.Errorf("layout spec: %w", err)
 	}
 	return layout, nil
 }
@@ -168,11 +176,23 @@ func writeAtomic(path string, data []byte) error {
 		tmp.Close()
 		return fmt.Errorf("write output: %w", err)
 	}
+	if err := tmp.Chmod(0o644); err != nil {
+		tmp.Close()
+		return fmt.Errorf("set output permissions: %w", err)
+	}
+	if err := tmp.Sync(); err != nil {
+		tmp.Close()
+		return fmt.Errorf("sync output: %w", err)
+	}
 	if err := tmp.Close(); err != nil {
 		return fmt.Errorf("close output: %w", err)
 	}
 	if err := os.Rename(name, path); err != nil {
 		return fmt.Errorf("rename output into place: %w", err)
+	}
+	if dirFile, err := os.Open(dir); err == nil {
+		_ = dirFile.Sync()
+		_ = dirFile.Close()
 	}
 	return nil
 }

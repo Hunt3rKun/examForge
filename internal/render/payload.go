@@ -38,11 +38,10 @@ type RenderInline struct {
 // ResolvedAsset is one asset staged into the workspace. Assets are sorted by
 // asset_id and each ID appears once, however often the exam references it.
 type ResolvedAsset struct {
-	AssetID   string  `json:"asset_id"`
-	Path      string  `json:"path"` // workspace-relative, POSIX separators
-	MediaType string  `json:"media_type"`
-	SHA256    string  `json:"sha256"`
-	WidthMM   float64 `json:"width_mm,omitempty"`
+	AssetID   string `json:"asset_id"`
+	Path      string `json:"path"` // workspace-relative, POSIX separators
+	MediaType string `json:"media_type"`
+	SHA256    string `json:"sha256"`
 }
 
 // Page and layout constants of one render, in millimetres. Everything that is
@@ -88,8 +87,8 @@ type RenderMargin struct {
 // RenderExam is the exam with every inline text field pre-tokenized.
 type RenderExam struct {
 	ExamID    string           `json:"exam_id"`
-	Title     string           `json:"title"`
-	Subtitle  string           `json:"subtitle,omitempty"`
+	Title     RenderInline     `json:"title"`
+	Subtitle  RenderInline     `json:"subtitle"`
 	Questions []RenderQuestion `json:"questions"`
 }
 
@@ -99,6 +98,7 @@ type RenderQuestion struct {
 	Index           int              `json:"index"`
 	Kind            string           `json:"kind,omitempty"`
 	DisplayNumber   string           `json:"display_number,omitempty"`
+	DisplayLabel    string           `json:"display_label,omitempty"`
 	Stem            []RenderBlock    `json:"stem"`
 	Options         []RenderOption   `json:"options,omitempty"`
 	OptionRequested string           `json:"option_requested,omitempty"`
