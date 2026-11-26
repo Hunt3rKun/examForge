@@ -1,0 +1,48 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://examforge.invalid/schemas/exam-ir-v1.json",
+  "title": "ExamForge Exam IR v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "exam_id", "metadata", "assets", "questions"],
+  "properties": {
+    "schema_version": {"const": "1.0.0"},
+    "exam_id": {"type": "string", "minLength": 1},
+    "metadata": {
+      "type": "object", "additionalProperties": false,
+      "required": ["title", "subject"],
+      "properties": {
+        "title": {"type": "string", "minLength": 1}, "subtitle": {"type": "string"},
+        "subject": {"type": "string", "enum": ["mathematics", "chinese", "english", "physics", "chemistry", "biology", "history", "geography", "politics", "other"]},
+        "grade": {"type": "string"}, "total_score": {"type": "number", "minimum": 0},
+        "duration_minutes": {"type": "integer", "minimum": 1}, "source_sha256": {"type": "string", "pattern": "^[a-fA-F0-9]{64}$"}
+      }
+    },
+    "assets": {"type": "object", "propertyNames": {"pattern": "^ast_[A-Za-z0-9_-]+$"}, "additionalProperties": {"$ref": "#/$defs/asset"}},
+    "questions": {"type": "array", "items": {"$ref": "#/$defs/question"}},
+    "sections": {"type": "array", "items": {"type": "object"}}
+  },
+  "$defs": {
+    "bbox": {"type": "object", "additionalProperties": false, "required": ["page", "rect"], "properties": {"page": {"type": "integer", "minimum": 1}, "rect": {"type": "array", "minItems": 4, "maxItems": 4, "items": {"type": "number", "minimum": 0, "maximum": 1}}}},
+    "asset": {"type": "object", "additionalProperties": false, "required": ["asset_id", "media_type", "uri", "status"], "properties": {"asset_id": {"type": "string", "pattern": "^ast_[A-Za-z0-9_-]+$"}, "media_type": {"type": "string", "minLength": 1}, "uri": {"type": "string", "minLength": 1}, "raw_uri": {"type": "string"}, "status": {"type": "string", "enum": ["raw_cropped", "cleaned", "vectorized"]}, "aspect_ratio": {"type": "number", "exclusiveMinimum": 0}, "suggested_width_mm": {"type": "number", "exclusiveMinimum": 0}, "caption": {"type": "string"}, "alt": {"type": "string"}, "source_bbox": {"$ref": "#/$defs/bbox"}}},
+    "cell": {"type": "object", "additionalProperties": false, "required": ["text"], "properties": {"text": {"type": "string"}, "colspan": {"type": "integer", "minimum": 1}, "rowspan": {"type": "integer", "minimum": 1}}},
+    "table": {"type": "object", "additionalProperties": false, "required": ["headers", "rows"], "properties": {"headers": {"oneOf": [{"type": "array", "items": {"type": "array", "items": {"$ref": "#/$defs/cell"}}, "minItems": 1}, {"type": "array", "items": {"$ref": "#/$defs/cell"}}]}, "rows": {"type": "array", "items": {"type": "array", "items": {"$ref": "#/$defs/cell"}}}}},
+    "block": {"description": "Core types are text, math_block, image_ref, table. The type namespace is open for future disciplines, e.g. chem_block and writing_grid.", "type": "object", "required": ["type"], "properties": {"type": {"type": "string", "minLength": 1}, "markdown": {"type": "string", "description": "Markdown with inline LaTeX and {{blank:N}} placeholders"}, "latex": {"type": "string"}, "asset_id": {"type": "string", "pattern": "^ast_[A-Za-z0-9_-]+$"}, "layout_hint": {"type": "string", "enum": ["center", "float_right", "inline", "grid_item"]}, "table": {"$ref": "#/$defs/table"}}, "allOf": [{"if": {"properties": {"type": {"const": "text"}}, "required": ["type"]}, "then": {"required": ["markdown"]}}, {"if": {"properties": {"type": {"const": "math_block"}}, "required": ["type"]}, "then": {"required": ["latex"]}}, {"if": {"properties": {"type": {"const": "image_ref"}}, "required": ["type"]}, "then": {"required": ["asset_id", "layout_hint"]}}, {"if": {"properties": {"type": {"const": "table"}}, "required": ["type"]}, "then": {"required": ["table"]}}]},
+    "answer": {"type": "object", "additionalProperties": false, "properties": {"short_values": {"type": "array", "items": {"type": "string"}}, "detail": {"type": "array", "items": {"$ref": "#/$defs/block"}}}},
+    "question": {
+      "type": "object", "additionalProperties": false,
+      "required": ["kind", "display_number", "stem"],
+      "properties": {
+        "kind": {"type": "string", "enum": ["single", "composite"]},
+        "display_number": {"type": "string"}, "question_type": {"type": "string"}, "score": {"type": "number", "minimum": 0},
+        "stem": {"type": "array", "items": {"$ref": "#/$defs/block"}},
+        "options": {"type": "array", "items": {"type": "object", "required": ["label", "content"], "properties": {"label": {"type": "string"}, "content": {"type": "array", "items": {"$ref": "#/$defs/block"}}}}},
+        "answer_space_mm": {"type": "number", "minimum": 0}, "answer": {"$ref": "#/$defs/answer"},
+        "analysis": {"type": "array", "items": {"$ref": "#/$defs/block"}},
+        "children": {"type": "array", "items": {"$ref": "#/$defs/question"}},
+        "metadata": {"type": "object", "properties": {"knowledge_points": {"type": "array", "items": {"type": "string"}}, "difficulty": {"type": "number", "minimum": 0, "maximum": 1}, "dedup_fingerprint": {"type": "string"}}},
+        "provenance": {"type": "object", "properties": {"bboxes": {"type": "array", "items": {"$ref": "#/$defs/bbox"}}, "confidence": {"type": "number", "minimum": 0, "maximum": 1}, "review_status": {"type": "string"}, "warnings": {"type": "array", "items": {"type": "string"}}}}
+      }
+    }
+  }
+}

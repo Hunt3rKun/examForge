@@ -1,0 +1,28 @@
+# ExamForge (铸卷)
+
+Stage 0 repository for converting source exams into a reusable, renderer-neutral Exam IR and rendering it with explicit layout specifications. This index is intentionally lightweight; subsystem files are the current-state contracts, while `docs/specs/` contains proposals only. Never mix proposals into current-state documentation.
+
+## Directory and documentation routes
+
+| Before changing | Read current-state contract | Main paths |
+|---|---|---|
+| IR / schemas | `docs/subsystems/exam-ir.md` | `schemas/`, `internal/ir/`, `testdata/golden/ir/` |
+| Rendering / templates | `docs/subsystems/render-engine.md` | `templates/`, renderer code, render fixtures |
+| Queues / pipeline | `docs/subsystems/pipeline-queue.md` | future `internal/pipeline/` |
+| Vision / parsing | `docs/subsystems/vision-parser.md` | future `internal/vision/`, `internal/parser/` |
+| Cross-cutting conventions | `docs/code-standards.md` | all code |
+
+Update the relevant `docs/subsystems/*.md` current-state contract with every code change and verify its paths against source. Put proposed designs in `docs/specs/` only.
+
+## Architecture invariants
+
+- **No CGO**, including transitive dependencies. Invoke `mutool`/`pdftoppm`, `typst`, and `pandoc` through `os/exec` wrappers for document operations.
+- Schema first: change `schemas/*.json` before changing corresponding data structures.
+- Rendering has the dual-input contract `Render(ExamDocumentIR, LayoutSpec) -> Artifact`; never use scattered CLI flags as layout policy. Keep content independent of layout.
+- Go owns deterministic inline Markdown / `$LaTeX$` / `{{blank:N}}` parsing (`internal/ir/inline` in MVP slice 1); never implement complex parsing regexes in `.typ` templates.
+- Every subprocess uses `context.WithTimeout` and cleans temporary files. External AI, parsing, and rendering capabilities are behind interfaces with offline mocks.
+- Exchange DTOs are separate from persistence: future storage uses `assets` (globally unique `asset_id`), `questions`, and `exams` tables.
+
+## Verification and reporting
+
+Before claiming any code change complete, actually run `./scripts/verify.sh`. Report the exact commands run and their actual results; explicitly list unverified items under **Not tried**. Never claim an unrun check passed.

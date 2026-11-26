@@ -1,0 +1,13 @@
+{
+  "schema_version": "1.0.0",
+  "exam_id": "exam_math_2026_mock_01",
+  "metadata": {"title": "高二数学阶段性测试", "subtitle": "函数与解析几何", "subject": "mathematics", "grade": "高二", "total_score": 100, "duration_minutes": 90, "source_sha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"},
+  "assets": {
+    "ast_01jexam0000000000000000001": {"asset_id": "ast_01jexam0000000000000000001", "media_type": "image/png", "uri": "testdata/golden/assets/sample_fig.png", "status": "raw_cropped", "aspect_ratio": 1.25, "suggested_width_mm": 40, "caption": "函数示意图", "alt": "坐标系中的曲线示意图", "source_bbox": {"page": 1, "rect": [0.1, 0.2, 0.4, 0.5]}}
+  },
+  "questions": [
+    {"kind": "single", "display_number": "1", "question_type": "single_choice", "score": 5, "stem": [{"type": "text", "markdown": "已知函数 $f(x)=x^2-2x$，其图像如图所示，则 $f(3)$ 等于（　　）"}, {"type": "image_ref", "asset_id": "ast_01jexam0000000000000000001", "layout_hint": "float_right"}], "options": [{"label": "A", "content": [{"type": "text", "markdown": "1"}]}, {"label": "B", "content": [{"type": "text", "markdown": "3"}]}, {"label": "C", "content": [{"type": "text", "markdown": "4"}]}, {"label": "D", "content": [{"type": "text", "markdown": "6"}]}], "answer": {"short_values": ["B"]}, "analysis": [{"type": "text", "markdown": "代入得 $f(3)=9-6=3$，故选 B。"}], "provenance": {"bboxes": [{"page": 1, "rect": [0.1, 0.1, 0.8, 0.4]}], "confidence": 0.98, "review_status": "approved", "warnings": []}},
+    {"kind": "composite", "display_number": "2", "question_type": "constructed_response", "score": 15, "stem": [{"type": "text", "markdown": "设数列 $a_n=2n+1$，求："}], "children": [{"kind": "single", "display_number": "(1)", "stem": [{"type": "text", "markdown": "求 $a_5$。"}, {"type": "math_block", "latex": "a_n=2n+1"}], "answer_space_mm": 12, "answer": {"short_values": ["11"]}}, {"kind": "single", "display_number": "(2)", "stem": [{"type": "text", "markdown": "求前 $n$ 项和。"}], "answer_space_mm": 20, "answer": {"detail": [{"type": "math_block", "latex": "S_n=n(n+2)"}]}, "analysis": [{"type": "text", "markdown": "利用等差数列求和公式。"}]}]},
+    {"kind": "single", "display_number": "3", "stem": [{"type": "text", "markdown": "观察下表并完成推理。"}, {"type": "table", "table": {"headers": [[{"text": "项目", "rowspan": 2}, {"text": "函数值", "colspan": 2}], [{"text": "$f(1)$"}, {"text": "$f(2)$"}]], "rows": [[{"text": "样例", "rowspan": 1}, {"text": "2"}, {"text": "4"}]]}}]}
+  ]
+}

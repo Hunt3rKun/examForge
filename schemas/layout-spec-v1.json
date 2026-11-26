@@ -1,0 +1,14 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://examforge.invalid/schemas/layout-spec-v1.json",
+  "title": "ExamForge Layout Spec v1",
+  "type": "object", "additionalProperties": false,
+  "required": ["schema_version", "name", "paper_size", "columns", "mode", "show_answer", "show_analysis", "show_binding_line", "option_layout"],
+  "properties": {
+    "schema_version": {"const": "1.0.0"}, "name": {"type": "string", "minLength": 1},
+    "paper_size": {"type": "string", "enum": ["a4", "a3", "b4"]},
+    "columns": {"type": "integer", "enum": [1, 2]}, "mode": {"type": "string", "enum": ["student", "teacher"]},
+    "show_answer": {"type": "boolean"}, "show_analysis": {"type": "boolean"}, "show_binding_line": {"type": "boolean"},
+    "option_layout": {"type": "string", "enum": ["auto", "1x4", "2x2", "4x1"]}, "header_text": {"type": "string"}, "footer_text": {"type": "string"}
+  }
+}

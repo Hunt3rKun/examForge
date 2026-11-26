@@ -1,0 +1,29 @@
+# Go build outputs
+/bin/
+/build/
+/dist/
+*.exe
+*.test
+*.out
+
+# Generated documents and scratch files
+*.pdf
+*.docx
+*.tmp
+*.log
+
+# Secrets and local configuration
+.env
+.env.*
+!.env.example
+
+# Local data mounts
+/data/
+/minio-data/
+/postgres-data/
+/seaweedfs-data/
+
+# Editor / OS
+.DS_Store
+.idea/
+.vscode/
