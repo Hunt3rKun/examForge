@@ -65,17 +65,31 @@ func Precompile(exam ir.ExamDocumentIR, layout ir.LayoutSpec) (*RenderPayload, e
 			ExamID:    exam.ExamID,
 			Title:     RenderInline{Tokens: c.tokenize(exam.Metadata.Title, "metadata.title")},
 			Subtitle:  RenderInline{Tokens: c.tokenize(exam.Metadata.Subtitle, "metadata.subtitle")},
+			Sections:  []RenderSection{},
 			Questions: []RenderQuestion{},
 		},
 		Layout: lay,
 		Assets: []ResolvedAsset{},
 	}
-	for i, q := range exam.Questions {
-		rq, err := c.question(q, fmt.Sprintf("questions[%d]", i))
-		if err != nil {
-			return nil, err
+	for si, section := range exam.Sections {
+		rs := RenderSection{
+			SectionID: section.SectionID,
+			Title:     RenderInline{Tokens: c.tokenize(section.Title, fmt.Sprintf("sections[%d].title", si))},
+			Questions: []RenderQuestion{},
 		}
-		payload.Exam.Questions = append(payload.Exam.Questions, rq)
+		if section.Instruction != "" {
+			rs.Instruction = &RenderInline{Tokens: c.tokenize(section.Instruction, fmt.Sprintf("sections[%d].instruction", si))}
+		}
+		for qi, q := range section.Questions {
+			path := fmt.Sprintf("sections[%d].questions[%d]", si, qi)
+			rq, err := c.question(q, path)
+			if err != nil {
+				return nil, err
+			}
+			rs.Questions = append(rs.Questions, rq)
+			payload.Exam.Questions = append(payload.Exam.Questions, rq)
+		}
+		payload.Exam.Sections = append(payload.Exam.Sections, rs)
 	}
 	payload.Assets = c.assetList()
 	payload.Warnings = c.warnings
@@ -114,6 +128,7 @@ func (c *precompiler) question(q ir.QuestionItem, path string) (RenderQuestion, 
 		return RenderQuestion{}, fmt.Errorf("%w: %s.answer_space_mm must be a finite non-negative number, got %v", ErrInvalidInput, path, q.AnswerSpaceMM)
 	}
 	out := RenderQuestion{
+		Path:            path,
 		Index:           c.next,
 		Kind:            q.Kind,
 		DisplayNumber:   q.DisplayNumber,

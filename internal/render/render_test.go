@@ -165,7 +165,7 @@ func TestRenderGoldenRealTypst(t *testing.T) {
 			// option_measure_failed: auto grids must really be measured.
 			want := []RenderWarning{{
 				Code: "float_fallback",
-				Path: "questions[0].stem[1]",
+				Path: "sections[0].questions[0].stem[1]",
 			}}
 			if len(art.Warnings) != len(want) {
 				t.Fatalf("warnings = %+v, want exactly %+v", art.Warnings, want)

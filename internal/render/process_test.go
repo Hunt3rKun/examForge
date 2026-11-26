@@ -133,10 +133,10 @@ func fakeExam() ir.ExamDocumentIR {
 		SchemaVersion: "1.0.0", ExamID: "exam_fake",
 		Metadata: ir.ExamMetadata{Title: "假命令样例", Subject: "other"},
 		Assets:   map[string]ir.Asset{},
-		Questions: []ir.QuestionItem{{
+		Sections: []ir.Section{{SectionID: "sec_fake", Title: "练习题", Questions: []ir.QuestionItem{{
 			Kind: "single", DisplayNumber: "1",
 			Stem: []ir.ContentBlock{{Type: "text", Markdown: "题干"}},
-		}},
+		}}}},
 	}
 }
 
@@ -451,7 +451,7 @@ func TestRenderAssetFailureCleanup(t *testing.T) {
 	ft := newFakeTracker(t, "success")
 	exam := fakeExam()
 	exam.Assets = map[string]ir.Asset{testAssetID: testAsset()}
-	exam.Questions[0].Stem = append(exam.Questions[0].Stem, ir.ContentBlock{Type: "image_ref", AssetID: testAssetID, LayoutHint: "inline"})
+	exam.Sections[0].Questions[0].Stem = append(exam.Sections[0].Questions[0].Stem, ir.ContentBlock{Type: "image_ref", AssetID: testAssetID, LayoutHint: "inline"})
 	r := newFakeRenderer(t, "success", ft, func(cfg *TypstConfig) {
 		cfg.AssetResolver = AssetResolverFunc(func(ctx context.Context, assetID string, asset ir.Asset) (io.ReadCloser, error) {
 			return nil, errors.New("resolver exploded")
@@ -472,7 +472,7 @@ func TestRenderAssetErrorChain(t *testing.T) {
 	ft := newFakeTracker(t, "success")
 	exam := fakeExam()
 	exam.Assets = map[string]ir.Asset{testAssetID: testAsset()}
-	exam.Questions[0].Stem = append(exam.Questions[0].Stem,
+	exam.Sections[0].Questions[0].Stem = append(exam.Sections[0].Questions[0].Stem,
 		ir.ContentBlock{Type: "image_ref", AssetID: testAssetID, LayoutHint: "inline"})
 	cause := errors.New("backend unavailable")
 	r := newFakeRenderer(t, "success", ft, func(cfg *TypstConfig) {

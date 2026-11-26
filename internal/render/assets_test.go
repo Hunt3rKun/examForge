@@ -404,7 +404,7 @@ func TestRenderRejectsOversizedAssetTotal(t *testing.T) {
 		idA: {AssetID: idA, MediaType: "image/png", URI: "ignored", Status: "raw_cropped"},
 		idB: {AssetID: idB, MediaType: "image/png", URI: "ignored", Status: "raw_cropped"},
 	}
-	exam.Questions[0].Stem = append(exam.Questions[0].Stem,
+	exam.Sections[0].Questions[0].Stem = append(exam.Sections[0].Questions[0].Stem,
 		ir.ContentBlock{Type: "image_ref", AssetID: idA, LayoutHint: "inline"},
 		ir.ContentBlock{Type: "image_ref", AssetID: idB, LayoutHint: "inline"})
 	png, err := os.ReadFile("../../testdata/golden/assets/sample_fig.png")

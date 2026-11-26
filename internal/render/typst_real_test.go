@@ -11,6 +11,8 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+
+	"examforge/internal/ir"
 )
 
 // requireTool skips a real-render test when an external PDF tool is missing.
@@ -383,11 +385,12 @@ func TestRenderHeaderFooter(t *testing.T) {
 	// A long exam forces multiple pages.
 	exam := loadIR(t, "../../testdata/render/ir/pages.json")
 	long := exam
-	long.Questions = nil
+	long.Sections = append([]ir.Section(nil), exam.Sections...)
+	long.Sections[0].Questions = nil
 	for i := 0; i < 30; i++ {
-		q := exam.Questions[0]
+		q := exam.Sections[0].Questions[0]
 		q.DisplayNumber = strconv.Itoa(i + 1)
-		long.Questions = append(long.Questions, q)
+		long.Sections[0].Questions = append(long.Sections[0].Questions, q)
 	}
 	r := newRenderer(t, func(cfg *TypstConfig) { cfg.AssetResolver = renderResolver(t) })
 	art, err := r.Render(context.Background(), long, loadLayout(t, "../../testdata/render/layouts/pages-a4-2col.json"))

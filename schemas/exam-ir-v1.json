@@ -4,7 +4,7 @@
   "title": "ExamForge Exam IR v1",
   "type": "object",
   "additionalProperties": false,
-  "required": ["schema_version", "exam_id", "metadata", "assets", "questions"],
+  "required": ["schema_version", "exam_id", "metadata", "assets", "sections"],
   "properties": {
     "schema_version": {"const": "1.0.0"},
     "exam_id": {"type": "string", "minLength": 1},
@@ -19,8 +19,7 @@
       }
     },
     "assets": {"type": "object", "maxProperties": 1024, "propertyNames": {"pattern": "^ast_[A-Za-z0-9_-]+$"}, "additionalProperties": {"$ref": "#/$defs/asset"}},
-    "questions": {"type": "array", "maxItems": 2048, "items": {"$ref": "#/$defs/question"}},
-    "sections": {"type": "array", "maxItems": 512, "items": {"type": "object", "maxProperties": 64}}
+    "sections": {"type": "array", "minItems": 1, "maxItems": 512, "items": {"$ref": "#/$defs/section"}}
   },
   "$defs": {
     "plainText": {"type": "string", "maxLength": 65536, "description": "Bounded text field; inline parsing applies only to fields documented as inline content"},
@@ -33,10 +32,12 @@
     "block": {"description": "Core types are text, math_block, image_ref, table. The type namespace is open for future disciplines, e.g. chem_block and writing_grid.", "type": "object", "required": ["type"], "properties": {"type": {"type": "string", "maxLength": 128, "minLength": 1}, "markdown": {"$ref": "#/$defs/inlineText", "description": "Markdown with inline LaTeX and {{blank:N}} placeholders"}, "latex": {"type": "string", "maxLength": 65536}, "asset_id": {"type": "string", "maxLength": 128, "pattern": "^ast_[A-Za-z0-9_-]+$"}, "layout_hint": {"type": "string", "enum": ["center", "float_right", "inline", "grid_item"]}, "table": {"$ref": "#/$defs/table"}}, "allOf": [{"if": {"properties": {"type": {"const": "text"}}, "required": ["type"]}, "then": {"required": ["markdown"]}}, {"if": {"properties": {"type": {"const": "math_block"}}, "required": ["type"]}, "then": {"required": ["latex"]}}, {"if": {"properties": {"type": {"const": "image_ref"}}, "required": ["type"]}, "then": {"required": ["asset_id", "layout_hint"]}}, {"if": {"properties": {"type": {"const": "table"}}, "required": ["type"]}, "then": {"required": ["table"]}}]},
     "answer": {"type": "object", "additionalProperties": false, "properties": {"short_values": {"type": "array", "maxItems": 256, "items": {"$ref": "#/$defs/inlineText"}}, "detail": {"$ref": "#/$defs/blocks"}}},
     "blocks": {"type": "array", "maxItems": 1024, "items": {"$ref": "#/$defs/block"}},
+    "section": {"type": "object", "additionalProperties": false, "required": ["section_id", "title", "questions"], "properties": {"section_id": {"type": "string", "minLength": 1, "maxLength": 128}, "title": {"$ref": "#/$defs/plainText", "minLength": 1}, "instruction": {"$ref": "#/$defs/plainText"}, "questions": {"type": "array", "minItems": 1, "maxItems": 2048, "items": {"$ref": "#/$defs/question"}}}},
     "question": {
       "type": "object", "additionalProperties": false,
       "required": ["kind", "display_number", "stem"],
       "properties": {
+        "question_id": {"type": "string", "minLength": 1, "maxLength": 128},
         "kind": {"type": "string", "enum": ["single", "composite"]},
         "display_number": {"type": "string", "maxLength": 128}, "question_type": {"type": "string", "maxLength": 128}, "score": {"type": "number", "minimum": 0},
         "stem": {"$ref": "#/$defs/blocks"},

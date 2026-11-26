@@ -281,7 +281,7 @@ func (r *TypstRenderer) resolveOptionGrids(ctx context.Context, ws string, paylo
 		q.OptionColumns = GridColumns(Grid4x1)
 		payload.Warnings = append(payload.Warnings, RenderWarning{
 			Code:    "option_unmeasured",
-			Path:    fmt.Sprintf("questions[%d]", q.Index),
+			Path:    q.Path,
 			Message: "option widths could not be measured; the grid fell back to 4x1",
 		})
 	}
@@ -358,7 +358,9 @@ func eachQuestion(payload *RenderPayload, fn func(*RenderQuestion)) {
 			walk(qs[i].Children)
 		}
 	}
-	walk(payload.Exam.Questions)
+	for i := range payload.Exam.Sections {
+		walk(payload.Exam.Sections[i].Questions)
+	}
 }
 
 // lastLine keeps the most specific line of an error for a warning message.

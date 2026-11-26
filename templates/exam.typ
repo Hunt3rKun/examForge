@@ -252,11 +252,24 @@
   ]
 ]
 
+#let render-section(section) = {
+  block(above: 0.8em, below: 0.4em)[
+    #text(weight: "bold", size: 13pt)[#render-inline(section.title.tokens)]
+    #if section.at("instruction", default: none) != none [
+      #v(0.2em)
+      #text(size: 9.5pt)[#render-inline(section.instruction.tokens)]
+    ]
+  ]
+  for q in section.questions { render-question(q, 0) }
+}
+
 #if payload.pass == "measure" {
-  for q in exam.questions { measure-question(q, 0) }
+  for section in exam.sections {
+    for q in section.questions { measure-question(q, 0) }
+  }
 } else {
   if page-layout.columns == 1 { title-block() }
   // A two-column title spans the page: a page-wide float above the columns.
   else { place(top + center, float: true, scope: "parent", title-block()) }
-  for q in exam.questions { render-question(q, 0) }
+  for section in exam.sections { render-section(section) }
 }

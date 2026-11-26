@@ -14,9 +14,9 @@ func minimalExam(stem ...ir.ContentBlock) ir.ExamDocumentIR {
 		SchemaVersion: "1.0.0", ExamID: "exam_hardening",
 		Metadata: ir.ExamMetadata{Title: "边界测试", Subject: "mathematics"},
 		Assets:   map[string]ir.Asset{},
-		Questions: []ir.QuestionItem{{
+		Sections: []ir.Section{{SectionID: "sec_hardening", Title: "测试", Questions: []ir.QuestionItem{{
 			Kind: "single", DisplayNumber: "1", Stem: stem,
-		}},
+		}}}},
 	}
 }
 
@@ -46,7 +46,7 @@ func TestRenderRejectsUnsafeOptionLabels(t *testing.T) {
 	for _, label := range []string{"", " ", "{{blank:1}}", "$x$"} {
 		t.Run(label, func(t *testing.T) {
 			exam := minimalExam(ir.ContentBlock{Type: "text", Markdown: "题干"})
-			exam.Questions[0].Options = []ir.Option{{Label: label, Content: []ir.ContentBlock{{Type: "text", Markdown: "选项"}}}}
+			exam.Sections[0].Questions[0].Options = []ir.Option{{Label: label, Content: []ir.ContentBlock{{Type: "text", Markdown: "选项"}}}}
 			_, err := r.Render(context.Background(), exam, layoutFor(truthRow{ModeStudent, false, false}))
 			if !errors.Is(err, ErrInvalidInput) {
 				t.Fatalf("label %q: err = %v, want ErrInvalidInput", label, err)
@@ -83,7 +83,7 @@ func TestPrecompileRejectsNestingAndTableBombs(t *testing.T) {
 			child = ir.QuestionItem{Kind: "composite", DisplayNumber: "x", Stem: []ir.ContentBlock{{Type: "text", Markdown: "题"}}, Children: []ir.QuestionItem{child}}
 		}
 		exam := minimalExam()
-		exam.Questions = []ir.QuestionItem{child}
+		exam.Sections[0].Questions = []ir.QuestionItem{child}
 		_, err := Precompile(exam, layoutFor(truthRow{ModeStudent, false, false}))
 		if !errors.Is(err, ErrInvalidInput) || !strings.Contains(err.Error(), "nesting") {
 			t.Fatalf("err = %v, want depth ErrInvalidInput", err)

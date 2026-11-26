@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/santhosh-tekuri/jsonschema/v6"
 
@@ -223,9 +224,71 @@ func ValidateExamSemantics(exam ExamDocumentIR) error {
 			return fmt.Errorf("assets[%q].asset_id = %q: key and asset_id must match", key, asset.AssetID)
 		}
 	}
+	if len(exam.Sections) == 0 {
+		return errors.New("sections must contain at least one section")
+	}
+	sectionIDs := make(map[string]struct{}, len(exam.Sections))
 	count := 0
-	for i := range exam.Questions {
-		if err := validateQuestion(exam.Questions[i], fmt.Sprintf("questions[%d]", i), 1, &count); err != nil {
+	for si := range exam.Sections {
+		section := exam.Sections[si]
+		path := fmt.Sprintf("sections[%d]", si)
+		if section.SectionID == "" || utf8.RuneCountInString(section.SectionID) > 128 {
+			return fmt.Errorf("%s.section_id must contain 1 to 128 characters", path)
+		}
+		if _, exists := sectionIDs[section.SectionID]; exists {
+			return fmt.Errorf("%s.section_id %q is duplicated", path, section.SectionID)
+		}
+		sectionIDs[section.SectionID] = struct{}{}
+		if strings.TrimSpace(section.Title) == "" || utf8.RuneCountInString(section.Title) > 65536 {
+			return fmt.Errorf("%s.title must contain visible text and be at most 65536 characters", path)
+		}
+		if len(section.Questions) == 0 {
+			return fmt.Errorf("%s.questions must contain at least one question", path)
+		}
+		for qi := range section.Questions {
+			qpath := fmt.Sprintf("%s.questions[%d]", path, qi)
+			if err := validateQuestion(section.Questions[qi], qpath, 1, &count); err != nil {
+				return err
+			}
+			if err := validateQuestionAssetRefs(section.Questions[qi], qpath, exam.Assets); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+func validateQuestionAssetRefs(q QuestionItem, path string, assets map[string]Asset) error {
+	checkBlocks := func(blocks []ContentBlock, blockPath string) error {
+		for i, block := range blocks {
+			if block.Type != "image_ref" {
+				continue
+			}
+			id := block.AssetID
+			if _, ok := assets[id]; !ok {
+				return fmt.Errorf("%s[%d].asset_id %q does not reference an asset in the exam", blockPath, i, id)
+			}
+		}
+		return nil
+	}
+	if err := checkBlocks(q.Stem, path+".stem"); err != nil {
+		return err
+	}
+	for i, option := range q.Options {
+		if err := checkBlocks(option.Content, fmt.Sprintf("%s.options[%d].content", path, i)); err != nil {
+			return err
+		}
+	}
+	if q.Answer != nil {
+		if err := checkBlocks(q.Answer.Detail, path+".answer.detail"); err != nil {
+			return err
+		}
+	}
+	if err := checkBlocks(q.Analysis, path+".analysis"); err != nil {
+		return err
+	}
+	for i, child := range q.Children {
+		if err := validateQuestionAssetRefs(child, fmt.Sprintf("%s.children[%d]", path, i), assets); err != nil {
 			return err
 		}
 	}

@@ -95,6 +95,78 @@ func TestInvalidLayoutRejected(t *testing.T) {
 	}
 }
 
+func TestSectionSemanticValidation(t *testing.T) {
+	data, err := os.ReadFile(filepath.Join("..", "..", "testdata", "golden", "ir", "sample.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var base ExamDocumentIR
+	if err := json.Unmarshal(data, &base); err != nil {
+		t.Fatal(err)
+	}
+	cases := []struct {
+		name   string
+		mutate func(*ExamDocumentIR)
+		want   string
+	}{
+		{"empty section id", func(e *ExamDocumentIR) { e.Sections[0].SectionID = "" }, "section_id"},
+		{"duplicate section id", func(e *ExamDocumentIR) { e.Sections[1].SectionID = e.Sections[0].SectionID }, "duplicated"},
+		{"blank title", func(e *ExamDocumentIR) { e.Sections[0].Title = "  " }, "title"},
+		{"empty questions", func(e *ExamDocumentIR) { e.Sections[0].Questions = nil }, "questions"},
+		{"missing asset across section", func(e *ExamDocumentIR) {
+			e.Sections[1].Questions[0].Stem = []ContentBlock{{Type: "image_ref", AssetID: "ast_missing", LayoutHint: "inline"}}
+		}, "does not reference an asset"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			exam := base
+			exam.Sections = append([]Section(nil), base.Sections...)
+			exam.Sections[0].Questions = append([]QuestionItem(nil), base.Sections[0].Questions...)
+			exam.Sections[1].Questions = append([]QuestionItem(nil), base.Sections[1].Questions...)
+			tc.mutate(&exam)
+			if err := ValidateExamSemantics(exam); err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("ValidateExamSemantics() error = %v, want substring %q", err, tc.want)
+			}
+		})
+	}
+}
+
+func TestInvalidSectionSchemaRejected(t *testing.T) {
+	schema := filepath.Join("..", "..", "schemas", "exam-ir-v1.json")
+	base, err := os.ReadFile(filepath.Join("..", "..", "testdata", "golden", "ir", "sample.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	cases := []struct{ name, old, replacement string }{
+		{"empty id", `"section_id": "sec_choice"`, `"section_id": ""`},
+		{"empty title", `"title": "一、单项选择题"`, `"title": ""`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			modified := replaceFirst(string(base), tc.old, tc.replacement)
+			if modified == string(base) {
+				t.Fatalf("fixture does not contain %q", tc.old)
+			}
+			if err := ValidateSchema(schema, []byte(modified)); err == nil {
+				t.Fatal("expected schema validation failure")
+			}
+		})
+	}
+	var document map[string]any
+	if err := json.Unmarshal(base, &document); err != nil {
+		t.Fatal(err)
+	}
+	sections := document["sections"].([]any)
+	sections[0].(map[string]any)["questions"] = []any{}
+	modified, err := json.Marshal(document)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := ValidateSchema(schema, modified); err == nil {
+		t.Fatal("empty section questions passed schema validation")
+	}
+}
+
 func contains(s, sub string) bool { return len(sub) == 0 || index(s, sub) >= 0 }
 func index(s, sub string) int {
 	for i := 0; i+len(sub) <= len(s); i++ {

@@ -111,7 +111,9 @@ func examHasAnswer(exam ir.ExamDocumentIR, index int) bool {
 			walk(q.Children)
 		}
 	}
-	walk(exam.Questions)
+	for _, section := range exam.Sections {
+		walk(section.Questions)
+	}
 	return found
 }
 
@@ -128,7 +130,9 @@ func examHasAnalysis(exam ir.ExamDocumentIR, index int) bool {
 			walk(q.Children)
 		}
 	}
-	walk(exam.Questions)
+	for _, section := range exam.Sections {
+		walk(section.Questions)
+	}
 	return found
 }
 
@@ -162,7 +166,7 @@ func TestPrecompileTokenizesEveryTextField(t *testing.T) {
 		t.Errorf("Q1 analysis not tokenized with math: %+v", q1.Analysis)
 	}
 	// Q2 children: stem math and math_block kept verbatim.
-	q2 := payload.Exam.Questions[1]
+	q2 := payload.Exam.Questions[2]
 	if len(q2.Children) != 2 {
 		t.Fatalf("Q2 children = %d, want 2", len(q2.Children))
 	}
@@ -184,7 +188,7 @@ func TestPrecompileTokenizesEveryTextField(t *testing.T) {
 		t.Errorf("child (2) answer detail math_block altered: %+v", c2.Answer)
 	}
 	// Q3 table cells: header math and body text tokenized, spans normalized.
-	q3 := payload.Exam.Questions[2]
+	q3 := payload.Exam.Questions[1]
 	tbl := q3.Stem[1].Table
 	if tbl == nil || tbl.Columns != 3 || len(tbl.Rows) != 3 {
 		t.Fatalf("Q3 table = %+v, want 3 columns x 3 rows", tbl)
@@ -208,13 +212,46 @@ func TestPrecompileTokenizesEveryTextField(t *testing.T) {
 	})
 }
 
+func TestPrecompileSections(t *testing.T) {
+	exam := loadIR(t, testGoldenIR)
+	payload, err := Precompile(exam, layoutFor(truthRow{ModeStudent, false, false}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(payload.Exam.Sections) != 2 {
+		t.Fatalf("sections = %d, want 2", len(payload.Exam.Sections))
+	}
+	first := payload.Exam.Sections[0]
+	if first.SectionID != "sec_choice" || len(first.Title.Tokens) == 0 || first.Instruction == nil || len(first.Instruction.Tokens) == 0 {
+		t.Errorf("section metadata was not tokenized: %+v", first)
+	}
+	if len(first.Questions) != 2 || len(payload.Exam.Sections[1].Questions) != 1 {
+		t.Errorf("section question counts = %d, %d; want 2, 1", len(first.Questions), len(payload.Exam.Sections[1].Questions))
+	}
+	encoded, err := json.Marshal(payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var root map[string]json.RawMessage
+	if err := json.Unmarshal(encoded, &root); err != nil {
+		t.Fatal(err)
+	}
+	var examJSON map[string]json.RawMessage
+	if err := json.Unmarshal(root["exam"], &examJSON); err != nil {
+		t.Fatal(err)
+	}
+	if _, exists := examJSON["questions"]; exists {
+		t.Errorf("payload exposes a flattened root questions field")
+	}
+}
+
 // TestPrecompileTitleAndDisplayLabel asserts title/subtitle are tokenized and
 // question numbering is display-ready without template punctuation logic.
 func TestPrecompileTitleAndDisplayLabel(t *testing.T) {
 	exam := minimalExam(ir.ContentBlock{Type: "text", Markdown: "题干"})
 	exam.Metadata.Title = "函数 $f(x)$ 综合卷"
 	exam.Metadata.Subtitle = "副标题"
-	exam.Questions[0].DisplayNumber = "一、"
+	exam.Sections[0].Questions[0].DisplayNumber = "一、"
 	payload, err := Precompile(exam, layoutFor(truthRow{ModeStudent, false, false}))
 	if err != nil {
 		t.Fatal(err)
@@ -290,7 +327,7 @@ func TestPrecompileFloatGroup(t *testing.T) {
 	if img.Kind != BlockImage || img.Align != "right" {
 		t.Errorf("golden float fallback = %+v, want right-aligned image", img)
 	}
-	if !hasWarning(gp.Warnings, "float_fallback", "questions[0].stem[1]") {
+	if !hasWarning(gp.Warnings, "float_fallback", "sections[0].questions[0].stem[1]") {
 		t.Errorf("missing float_fallback warning: %+v", gp.Warnings)
 	}
 }
@@ -323,10 +360,10 @@ func TestPrecompileUnknownBlock(t *testing.T) {
 		SchemaVersion: "1.0.0", ExamID: "exam_unknown",
 		Metadata: ir.ExamMetadata{Title: "未知块", Subject: "other"},
 		Assets:   map[string]ir.Asset{},
-		Questions: []ir.QuestionItem{{
+		Sections: []ir.Section{{SectionID: "sec_test", Title: "测试", Questions: []ir.QuestionItem{{
 			Kind: "single", DisplayNumber: "1",
 			Stem: []ir.ContentBlock{{Type: "chem_block", LaTeX: "H2O"}},
-		}},
+		}}}},
 	}
 	payload, err := Precompile(exam, layoutFor(truthRow{ModeStudent, false, false}))
 	if err != nil {
@@ -339,7 +376,7 @@ func TestPrecompileUnknownBlock(t *testing.T) {
 	if !strings.Contains(string(blk.Raw), "H2O") {
 		t.Errorf("unknown block raw lost fields: %s", blk.Raw)
 	}
-	if !hasWarning(payload.Warnings, "unknown_block", "questions[0].stem[0]") {
+	if !hasWarning(payload.Warnings, "unknown_block", "sections[0].questions[0].stem[0]") {
 		t.Errorf("missing unknown_block warning: %+v", payload.Warnings)
 	}
 }
@@ -350,10 +387,10 @@ func TestPrecompileMissingAsset(t *testing.T) {
 		SchemaVersion: "1.0.0", ExamID: "exam_missing_asset",
 		Metadata: ir.ExamMetadata{Title: "缺资产", Subject: "other"},
 		Assets:   map[string]ir.Asset{},
-		Questions: []ir.QuestionItem{{
+		Sections: []ir.Section{{SectionID: "sec_test", Title: "测试", Questions: []ir.QuestionItem{{
 			Kind: "single", DisplayNumber: "1",
 			Stem: []ir.ContentBlock{{Type: "image_ref", AssetID: "ast_01jmissing00000000000000001", LayoutHint: "inline"}},
-		}},
+		}}}},
 	}
 	_, err := Precompile(exam, layoutFor(truthRow{ModeStudent, false, false}))
 	if !errors.Is(err, ErrInvalidInput) {
@@ -385,8 +422,9 @@ func TestPrecompileInvalidInputs(t *testing.T) {
 	}
 	t.Run("answer_space", func(t *testing.T) {
 		bad := exam
-		bad.Questions = append([]ir.QuestionItem(nil), exam.Questions...)
-		bad.Questions[0].AnswerSpaceMM = math.NaN()
+		bad.Sections = append([]ir.Section(nil), exam.Sections...)
+		bad.Sections[0].Questions = append([]ir.QuestionItem(nil), exam.Sections[0].Questions...)
+		bad.Sections[0].Questions[0].AnswerSpaceMM = math.NaN()
 		if _, err := Precompile(bad, base); !errors.Is(err, ErrInvalidInput) {
 			t.Fatalf("err = %v, want ErrInvalidInput", err)
 		}
@@ -540,7 +578,7 @@ func FuzzBuildTableGrid(f *testing.F) {
 func TestBuildTableGrid(t *testing.T) {
 	t.Run("golden spans", func(t *testing.T) {
 		exam := loadIR(t, testGoldenIR)
-		grid, err := buildTableGrid(*exam.Questions[2].Stem[1].Table)
+		grid, err := buildTableGrid(*exam.Sections[0].Questions[1].Stem[1].Table)
 		if err != nil {
 			t.Fatal(err)
 		}

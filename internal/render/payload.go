@@ -89,12 +89,21 @@ type RenderExam struct {
 	ExamID    string           `json:"exam_id"`
 	Title     RenderInline     `json:"title"`
 	Subtitle  RenderInline     `json:"subtitle"`
-	Questions []RenderQuestion `json:"questions"`
+	Sections  []RenderSection  `json:"sections"`
+	Questions []RenderQuestion `json:"-"` // flattened root-question view for internal measurement/tests
+}
+
+type RenderSection struct {
+	SectionID   string           `json:"section_id"`
+	Title       RenderInline     `json:"title"`
+	Instruction *RenderInline    `json:"instruction,omitempty"`
+	Questions   []RenderQuestion `json:"questions"`
 }
 
 // RenderQuestion is one question or sub-question. Index is its stable pre-order
 // position in the exam and identifies it in the measure pass.
 type RenderQuestion struct {
+	Path            string           `json:"-"` // IR path used for diagnostics; never part of the Typst payload.
 	Index           int              `json:"index"`
 	Kind            string           `json:"kind,omitempty"`
 	DisplayNumber   string           `json:"display_number,omitempty"`

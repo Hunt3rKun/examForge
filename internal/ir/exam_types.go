@@ -10,8 +10,7 @@ type ExamDocumentIR struct {
 	ExamID        string           `json:"exam_id"`
 	Metadata      ExamMetadata     `json:"metadata"`
 	Assets        map[string]Asset `json:"assets"`
-	Questions     []QuestionItem   `json:"questions"`
-	Sections      []map[string]any `json:"sections,omitempty"`
+	Sections      []Section        `json:"sections"`
 }
 
 type ExamMetadata struct {
@@ -95,6 +94,7 @@ type Answer struct {
 }
 
 type QuestionItem struct {
+	QuestionID    string         `json:"question_id,omitempty"`
 	Kind          string         `json:"kind"`
 	DisplayNumber string         `json:"display_number"`
 	QuestionType  string         `json:"question_type,omitempty"`
@@ -107,6 +107,13 @@ type QuestionItem struct {
 	Children      []QuestionItem `json:"children,omitempty"`
 	Metadata      map[string]any `json:"metadata,omitempty"`
 	Provenance    map[string]any `json:"provenance,omitempty"`
+}
+
+type Section struct {
+	SectionID   string         `json:"section_id"`
+	Title       string         `json:"title"`
+	Instruction string         `json:"instruction,omitempty"`
+	Questions   []QuestionItem `json:"questions"`
 }
 
 type Option struct {
