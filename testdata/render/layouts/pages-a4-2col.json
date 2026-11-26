@@ -1,0 +1,1 @@
+{"schema_version": "1.0.0", "name": "pages-a4-2col", "paper_size": "a4", "columns": 2, "mode": "student", "show_answer": false, "show_analysis": false, "show_binding_line": true, "option_layout": "auto", "header_text": "页面要素样例（$f(x)$ 卷）", "footer_text": "第 {{blank:1}} 页 共 {{blank:2}} 页"}
