@@ -256,7 +256,7 @@ func TestEmbeddedMigrationsAreOrderedAndRiverFree(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Load embedded: %v", err)
 	}
-	want := []string{"assets", "questions", "ingest_jobs", "exams"}
+	want := []string{"assets", "questions", "ingest_jobs", "exams", "asset_raw_digest"}
 	if len(migrations) != len(want) {
 		t.Fatalf("embedded %d migrations, want %d", len(migrations), len(want))
 	}

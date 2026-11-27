@@ -41,11 +41,14 @@ import (
 	"examforge"
 	"examforge/internal/ir"
 	"examforge/internal/parser"
+	"examforge/internal/parser/cloud"
 	"examforge/internal/pipeline"
 	"examforge/internal/render"
 	"examforge/internal/storage"
 	"examforge/internal/store"
 	"examforge/internal/store/migrate"
+	"examforge/internal/vision/clean"
+	"examforge/internal/vision/raster"
 )
 
 func main() {
@@ -65,6 +68,9 @@ type config struct {
 	typstPath   string
 	timeout     time.Duration
 	migrate     bool
+	parserMode  string
+	parseBudget time.Duration
+	jobTimeout  time.Duration
 }
 
 func run() error {
@@ -78,10 +84,23 @@ func run() error {
 	flag.StringVar(&cfg.typstPath, "typst", render.DefaultTypstPath, "Typst executable")
 	flag.DurationVar(&cfg.timeout, "timeout", 2*time.Minute, "overall command timeout")
 	flag.BoolVar(&cfg.migrate, "migrate", true, "apply app and River migrations before running")
+	flag.StringVar(&cfg.parserMode, "parser", "mock", "parser adapter: mock (offline) or cloud (requires EXAMFORGE_VLM_* environment)")
+	flag.DurationVar(&cfg.parseBudget, "parse-budget", 8*time.Minute, "cloud parser total parse budget")
+	flag.DurationVar(&cfg.jobTimeout, "job-timeout", 10*time.Minute, "River ingest job timeout; must exceed parse budget + worker reserve")
 	flag.Parse()
 	if cfg.pdfPath == "" || cfg.outPath == "" {
 		flag.Usage()
 		return errors.New("-pdf and -out are required")
+	}
+	if cfg.parserMode != "mock" && cfg.parserMode != "cloud" {
+		return fmt.Errorf("unknown -parser %q; choose mock or cloud", cfg.parserMode)
+	}
+	if cfg.parserMode == "cloud" {
+		// Fail before any service connection when the live VLM configuration
+		// is incomplete. Values are never printed.
+		if _, _, _, err := cloud.EnvConfig(); err != nil {
+			return err
+		}
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -149,9 +168,9 @@ func run() error {
 	if err != nil {
 		return err
 	}
-	adapter, err := parser.NewMockParserAdapter()
+	adapter, err := buildParser(cfg, validator)
 	if err != nil {
-		return fmt.Errorf("mock parser: %w", err)
+		return err
 	}
 
 	riverClient, err := pipeline.NewRiverClient(pool, nil, nil)
@@ -162,8 +181,12 @@ func run() error {
 	if err != nil {
 		return err
 	}
+	workerCfg := pipeline.WorkerConfig{Secrets: []string{env.s3SecretAccessKey}}
+	if cfg.parserMode == "cloud" {
+		workerCfg.JobTimeout = cfg.jobTimeout
+	}
 	worker, err := pipeline.NewIngestWorker(repo, persister, objects, adapter, validator,
-		pipeline.RiverClient{Client: riverClient}, pipeline.WorkerConfig{Secrets: []string{env.s3SecretAccessKey}})
+		pipeline.RiverClient{Client: riverClient}, workerCfg)
 	if err != nil {
 		return err
 	}
@@ -243,6 +266,46 @@ func run() error {
 	}
 	fmt.Printf("exampipe: wrote %s (%d bytes)\n", cfg.outPath, len(artifact.Bytes))
 	return nil
+}
+
+// buildParser selects the adapter explicitly. The cloud path reads the live
+// endpoint only from EXAMFORGE_VLM_* environment variables; the API key is
+// never a flag and never printed. Diagnostics print bounded counters only.
+func buildParser(cfg config, validator *ir.Validator) (parser.ParserAdapter, error) {
+	if cfg.parserMode == "mock" {
+		adapter, err := parser.NewMockParserAdapter()
+		if err != nil {
+			return nil, fmt.Errorf("mock parser: %w", err)
+		}
+		return adapter, nil
+	}
+	baseURL, apiKey, model, err := cloud.EnvConfig()
+	if err != nil {
+		return nil, err
+	}
+	rasterizer, err := raster.NewMuPDFRasterizer(raster.Config{})
+	if err != nil {
+		return nil, fmt.Errorf("rasterizer: %w", err)
+	}
+	cleaner, err := clean.NewHSVCleaner(clean.DefaultConfig())
+	if err != nil {
+		return nil, fmt.Errorf("cleaner: %w", err)
+	}
+	adapter, err := cloud.NewCloudAPIParser(cloud.Config{
+		BaseURL: baseURL, APIKey: apiKey, Model: model,
+		Rasterizer: rasterizer, Cleaner: cleaner, Validator: validator,
+		TotalParseTimeout: cfg.parseBudget,
+		JobTimeout:        cfg.jobTimeout,
+		Diagnostics: func(d cloud.Diagnostics) {
+			fmt.Printf("exampipe: parse diagnostics: pages=%d raster=%dms extract=%dms merge=%dms repair=%dms crop=%dms repair_rounds=%d merge_calls=%d warnings=%d prompt_tokens=%d completion_tokens=%d\n",
+				d.Pages, d.RasterMillis, d.ExtractMillis, d.MergeMillis, d.RepairMillis, d.CropMillis,
+				d.RepairRounds, d.MergeCalls, d.Warnings, d.PromptTokens, d.CompletionTokens)
+		},
+	})
+	if err != nil {
+		return nil, fmt.Errorf("cloud parser: %w", err)
+	}
+	return adapter, nil
 }
 
 // lastApplied reports the highest ledger version after migrate.Up, or 0 when

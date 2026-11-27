@@ -76,8 +76,11 @@ func TestMockParseReplaysGoldenFixture(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !bytes.Equal(blob.Data, png) || blob.SHA256 != storage.HashBytes(png) || blob.MediaType != "image/png" {
+	if !bytes.Equal(blob.RawData, png) || blob.RawSHA256 != storage.HashBytes(png) || blob.MediaType != "image/png" {
 		t.Errorf("asset blob does not match the fixture file")
+	}
+	if len(blob.CleanData) != 0 || blob.SHA256 != "" {
+		t.Errorf("raw_cropped fixture asset carries clean payload")
 	}
 }
 

@@ -27,11 +27,17 @@ const AssetURIScheme = "examforge-asset://"
 
 // VerifiedAsset is an asset object that was uploaded and hashed before the
 // persistence transaction. Persist records the metadata; it never uploads.
+//
+// raw_cropped: StorageKey names the raw object, SHA256 verifies it, and the
+// raw companion fields are empty. cleaned: StorageKey names the clean object
+// (verified by SHA256) and RawStorageKey/RawSHA256 name and verify the
+// distinct raw companion object.
 type VerifiedAsset struct {
 	AssetID       string
 	StorageKey    string
-	RawStorageKey string // empty when no raw object was kept
+	RawStorageKey string // empty when no raw companion was kept
 	SHA256        string
+	RawSHA256     string // digest of the raw companion; empty when none
 }
 
 // SourceRecord ties one persistence to its ingest job and its uploaded objects.
@@ -220,6 +226,13 @@ func (a *Assembler) persistAssets(ctx context.Context, ws Workspace, exam ir.Exa
 		if !storage.ValidSHA256(upload.SHA256) || storage.ValidateKey(upload.StorageKey) != nil {
 			return fmt.Errorf("%w: asset %q has an incomplete upload record", ErrInvalid, upload.AssetID)
 		}
+		if (upload.RawStorageKey == "") != (upload.RawSHA256 == "") {
+			return fmt.Errorf("%w: asset %q raw companion key and digest must be present together", ErrInvalid, upload.AssetID)
+		}
+		if upload.RawStorageKey != "" &&
+			(!storage.ValidSHA256(upload.RawSHA256) || storage.ValidateKey(upload.RawStorageKey) != nil) {
+			return fmt.Errorf("%w: asset %q has an invalid raw companion record", ErrInvalid, upload.AssetID)
+		}
 		uploads[upload.AssetID] = upload
 	}
 	for id := range uploads {
@@ -243,12 +256,17 @@ func (a *Assembler) persistAssets(ctx context.Context, ws Workspace, exam ir.Exa
 			return fmt.Errorf("%w: asset %q: %v", ErrInvalid, id, err)
 		}
 		wantStorage := rawKey
-		if asset.Status != "raw_cropped" {
+		if asset.Status == "raw_cropped" {
+			// A raw-only asset stores one object: no companion, no second digest.
+			if upload.RawStorageKey != "" || upload.RawSHA256 != "" {
+				return fmt.Errorf("%w: asset %q is raw_cropped but carries a raw companion record", ErrInvalid, id)
+			}
+		} else {
 			if wantStorage, err = storage.CleanAssetKey(id, asset.MediaType); err != nil {
 				return fmt.Errorf("%w: asset %q: %v", ErrInvalid, id, err)
 			}
-			if upload.RawStorageKey != rawKey {
-				return fmt.Errorf("%w: asset %q keys do not follow the deterministic key rule", ErrInvalid, id)
+			if upload.RawStorageKey != rawKey || !storage.ValidSHA256(upload.RawSHA256) {
+				return fmt.Errorf("%w: asset %q needs a raw companion key and a valid raw digest", ErrInvalid, id)
 			}
 		}
 		if upload.StorageKey != wantStorage {
@@ -270,6 +288,7 @@ func (a *Assembler) persistAssets(ctx context.Context, ws Workspace, exam ir.Exa
 			Alt:              textOrNil(asset.Alt),
 			SourceBbox:       bbox,
 			Sha256:           upload.SHA256,
+			RawSha256:        textOrNil(upload.RawSHA256),
 		}
 		row, err := ws.GetAsset(ctx, id)
 		created := false
@@ -297,6 +316,13 @@ func (a *Assembler) persistAssets(ctx context.Context, ws Workspace, exam ir.Exa
 			// Same ID, different bytes: fail and keep the registered object.
 			return fmt.Errorf("%w: asset %q is registered with SHA-256 %s but %s was uploaded; nothing was overwritten",
 				ErrConflict, id, row.Sha256, upload.SHA256)
+		}
+		// The raw digest is part of the identity when both sides declare one.
+		// A legacy row (raw_sha256 IS NULL) predates the digest contract: its
+		// raw companion cannot be verified, so the stored row is kept as is
+		// and only the main object remains authoritative.
+		if row.RawSha256.Valid && incoming.RawSha256.Valid && row.RawSha256.String != incoming.RawSha256.String {
+			return fmt.Errorf("%w: asset %q raw companion is registered with a different SHA-256; nothing was overwritten", ErrConflict, id)
 		}
 		if !sameAssetIdentity(row, incoming) {
 			// Same bytes but different identity metadata is a conflict, never a

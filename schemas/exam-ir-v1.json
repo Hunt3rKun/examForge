@@ -19,7 +19,8 @@
       }
     },
     "assets": {"type": "object", "maxProperties": 1024, "propertyNames": {"pattern": "^ast_[A-Za-z0-9_-]+$"}, "additionalProperties": {"$ref": "#/$defs/asset"}},
-    "sections": {"type": "array", "minItems": 1, "maxItems": 512, "items": {"$ref": "#/$defs/section"}}
+    "sections": {"type": "array", "minItems": 1, "maxItems": 512, "items": {"$ref": "#/$defs/section"}},
+    "warnings": {"type": "array", "maxItems": 128, "items": {"type": "string", "maxLength": 512}, "description": "Bounded parser/processing observations; exchange metadata only, never persisted"}
   },
   "$defs": {
     "plainText": {"type": "string", "maxLength": 65536, "description": "Bounded text field; inline parsing applies only to fields documented as inline content"},

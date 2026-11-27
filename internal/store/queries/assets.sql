@@ -9,8 +9,8 @@ SELECT * FROM assets WHERE asset_id = $1;
 -- name: InsertAsset :one
 INSERT INTO assets (
     asset_id, media_type, storage_key, raw_storage_key, status,
-    aspect_ratio, suggested_width_mm, caption, alt, source_bbox, sha256
-) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+    aspect_ratio, suggested_width_mm, caption, alt, source_bbox, sha256, raw_sha256
+) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
 ON CONFLICT (asset_id) DO NOTHING
 RETURNING *;
 

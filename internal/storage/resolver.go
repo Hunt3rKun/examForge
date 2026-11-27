@@ -19,12 +19,19 @@ import (
 )
 
 // AssetRecord is what the asset registry states about one stored image. Only
-// StorageKey decides which object is read.
+// StorageKey decides which object is read; the raw companion (when present)
+// has its own key and independent digest.
+//
+// RawSHA256 empty with a RawStorageKey present marks a pre-digest legacy row:
+// the raw companion cannot be verified and ResolveRaw rejects it. The clean
+// digest never verifies raw bytes.
 type AssetRecord struct {
-	AssetID    string
-	StorageKey string
-	MediaType  string
-	SHA256     string
+	AssetID       string
+	StorageKey    string
+	MediaType     string
+	SHA256        string
+	RawStorageKey string
+	RawSHA256     string
 }
 
 // AssetLookup returns the server-side record for an asset ID. It reports
@@ -101,6 +108,43 @@ func (r *S3AssetResolver) Resolve(ctx context.Context, assetID string, asset ir.
 		return nil, transientOrAsset(err, assetID)
 	}
 	return newDigestReader(body, record.SHA256, assetID), nil
+}
+
+// ResolveRaw opens a bounded, digest-verified stream for the asset's raw
+// companion object. An asset with no companion reports render.ErrAsset; a
+// legacy companion without its own registered digest is rejected rather than
+// verified against the main (clean) digest.
+func (r *S3AssetResolver) ResolveRaw(ctx context.Context, assetID string, asset ir.Asset) (io.ReadCloser, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, fmt.Errorf("resolve raw asset %q: %w", assetID, err)
+	}
+	if err := ValidateAssetID(assetID); err != nil {
+		return nil, fmt.Errorf("%w: %v", render.ErrAsset, err)
+	}
+	if asset.AssetID != assetID {
+		return nil, fmt.Errorf("%w: asset %q was requested as %q", render.ErrAsset, asset.AssetID, assetID)
+	}
+	record, err := r.lookup.AssetRecord(ctx, assetID)
+	switch {
+	case errors.Is(err, ErrNotFound):
+		return nil, fmt.Errorf("%w: asset %q is not registered", render.ErrAsset, assetID)
+	case err != nil:
+		return nil, transientOrAsset(err, assetID)
+	case record.AssetID != assetID:
+		return nil, fmt.Errorf("%w: asset lookup returned %q for %q", render.ErrAsset, record.AssetID, assetID)
+	case record.RawStorageKey == "":
+		return nil, fmt.Errorf("%w: asset %q has no raw companion object", render.ErrAsset, assetID)
+	case !ValidSHA256(record.RawSHA256):
+		return nil, fmt.Errorf("%w: asset %q raw companion has no registered digest", render.ErrAsset, assetID)
+	}
+	if err := ValidateKey(record.RawStorageKey); err != nil {
+		return nil, fmt.Errorf("%w: asset %q has an invalid raw storage key: %v", render.ErrAsset, assetID, err)
+	}
+	body, err := r.store.Get(ctx, record.RawStorageKey, r.maxByte)
+	if err != nil {
+		return nil, transientOrAsset(err, assetID)
+	}
+	return newDigestReader(body, record.RawSHA256, assetID), nil
 }
 
 // transientOrAsset maps an object store error to the renderer's classes. A

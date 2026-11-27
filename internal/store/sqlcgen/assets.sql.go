@@ -25,7 +25,7 @@ func (q *Queries) DeleteAssets(ctx context.Context, assetIds []string) (int64, e
 }
 
 const getAsset = `-- name: GetAsset :one
-SELECT asset_id, media_type, storage_key, raw_storage_key, status, aspect_ratio, suggested_width_mm, caption, alt, source_bbox, sha256, created_at, updated_at FROM assets WHERE asset_id = $1
+SELECT asset_id, media_type, storage_key, raw_storage_key, status, aspect_ratio, suggested_width_mm, caption, alt, source_bbox, sha256, created_at, updated_at, raw_sha256 FROM assets WHERE asset_id = $1
 `
 
 func (q *Queries) GetAsset(ctx context.Context, assetID string) (Asset, error) {
@@ -45,6 +45,7 @@ func (q *Queries) GetAsset(ctx context.Context, assetID string) (Asset, error) {
 		&i.Sha256,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.RawSha256,
 	)
 	return i, err
 }
@@ -52,10 +53,10 @@ func (q *Queries) GetAsset(ctx context.Context, assetID string) (Asset, error) {
 const insertAsset = `-- name: InsertAsset :one
 INSERT INTO assets (
     asset_id, media_type, storage_key, raw_storage_key, status,
-    aspect_ratio, suggested_width_mm, caption, alt, source_bbox, sha256
-) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+    aspect_ratio, suggested_width_mm, caption, alt, source_bbox, sha256, raw_sha256
+) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
 ON CONFLICT (asset_id) DO NOTHING
-RETURNING asset_id, media_type, storage_key, raw_storage_key, status, aspect_ratio, suggested_width_mm, caption, alt, source_bbox, sha256, created_at, updated_at
+RETURNING asset_id, media_type, storage_key, raw_storage_key, status, aspect_ratio, suggested_width_mm, caption, alt, source_bbox, sha256, created_at, updated_at, raw_sha256
 `
 
 type InsertAssetParams struct {
@@ -70,6 +71,7 @@ type InsertAssetParams struct {
 	Alt              pgtype.Text
 	SourceBbox       []byte
 	Sha256           string
+	RawSha256        pgtype.Text
 }
 
 // Concurrent ingests of equal content may race here: both read no row, then
@@ -90,6 +92,7 @@ func (q *Queries) InsertAsset(ctx context.Context, arg InsertAssetParams) (Asset
 		arg.Alt,
 		arg.SourceBbox,
 		arg.Sha256,
+		arg.RawSha256,
 	)
 	var i Asset
 	err := row.Scan(
@@ -106,12 +109,13 @@ func (q *Queries) InsertAsset(ctx context.Context, arg InsertAssetParams) (Asset
 		&i.Sha256,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.RawSha256,
 	)
 	return i, err
 }
 
 const listAssets = `-- name: ListAssets :many
-SELECT asset_id, media_type, storage_key, raw_storage_key, status, aspect_ratio, suggested_width_mm, caption, alt, source_bbox, sha256, created_at, updated_at FROM assets WHERE asset_id = ANY($1::text[]) ORDER BY asset_id
+SELECT asset_id, media_type, storage_key, raw_storage_key, status, aspect_ratio, suggested_width_mm, caption, alt, source_bbox, sha256, created_at, updated_at, raw_sha256 FROM assets WHERE asset_id = ANY($1::text[]) ORDER BY asset_id
 `
 
 func (q *Queries) ListAssets(ctx context.Context, assetIds []string) ([]Asset, error) {
@@ -137,6 +141,7 @@ func (q *Queries) ListAssets(ctx context.Context, assetIds []string) ([]Asset, e
 			&i.Sha256,
 			&i.CreatedAt,
 			&i.UpdatedAt,
+			&i.RawSha256,
 		); err != nil {
 			return nil, err
 		}

@@ -22,6 +22,7 @@ type Asset struct {
 	Sha256           string
 	CreatedAt        pgtype.Timestamptz
 	UpdatedAt        pgtype.Timestamptz
+	RawSha256        pgtype.Text
 }
 
 type Exam struct {

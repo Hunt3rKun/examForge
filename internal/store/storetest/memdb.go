@@ -215,10 +215,19 @@ func (m *MemDB) InsertAsset(_ context.Context, arg sqlcgen.InsertAssetParams) (s
 			return sqlcgen.Asset{}, conflict("assets_storage_key_key")
 		}
 	}
+	// Mirror assets_raw_digest_needs_key: a digest without a companion key is
+	// rejected by the CHECK constraint in PostgreSQL, and by this fake.
+	if arg.RawSha256.Valid && !arg.RawStorageKey.Valid {
+		return sqlcgen.Asset{}, fmt.Errorf("%w: constraint assets_raw_digest_needs_key", store.ErrInvalid)
+	}
+	if arg.RawSha256.Valid && !storage.ValidSHA256(arg.RawSha256.String) {
+		return sqlcgen.Asset{}, fmt.Errorf("%w: constraint assets_raw_sha256_check", store.ErrInvalid)
+	}
 	row := sqlcgen.Asset{
 		AssetID: arg.AssetID, MediaType: arg.MediaType, StorageKey: arg.StorageKey, RawStorageKey: arg.RawStorageKey,
 		Status: arg.Status, AspectRatio: arg.AspectRatio, SuggestedWidthMm: arg.SuggestedWidthMm,
 		Caption: arg.Caption, Alt: arg.Alt, SourceBbox: append([]byte(nil), arg.SourceBbox...), Sha256: arg.Sha256,
+		RawSha256: arg.RawSha256,
 	}
 	m.assets[arg.AssetID] = row
 	return row, nil
@@ -714,5 +723,6 @@ func (m *MemDB) AssetRecord(ctx context.Context, assetID string) (storage.AssetR
 	if err != nil {
 		return storage.AssetRecord{}, err
 	}
-	return storage.AssetRecord{AssetID: row.AssetID, StorageKey: row.StorageKey, MediaType: row.MediaType, SHA256: row.Sha256}, nil
+	return storage.AssetRecord{AssetID: row.AssetID, StorageKey: row.StorageKey, MediaType: row.MediaType, SHA256: row.Sha256,
+		RawStorageKey: row.RawStorageKey.String, RawSHA256: row.RawSha256.String}, nil
 }

@@ -35,14 +35,24 @@ type Source struct {
 	Open func(ctx context.Context) (io.ReadCloser, error)
 }
 
-// AssetBlob is one image the parser extracted.
+// AssetBlob is one asset the parser extracted: the raw crop plus, when
+// cleaning succeeded, a distinct clean variant. Exactly one blob exists per
+// IR asset. The IR asset status decides which payload is required:
+// raw_cropped needs RawData and no CleanData; cleaned needs both, and they
+// must be different bytes. The worker recomputes every digest; a declared
+// digest is a claim, never trusted.
 type AssetBlob struct {
 	AssetID   string
 	MediaType string
-	Data      []byte
-	// SHA256 is the digest the parser declares for Data. Empty means the
-	// parser declares none; a declared value that does not match Data is a
-	// permanent input failure.
+	// RawData is the original crop bytes. Always required.
+	RawData []byte
+	// CleanData is the cleaned variant; empty for raw_cropped assets.
+	CleanData []byte
+	// RawSHA256 optionally declares the digest of RawData. Empty declares
+	// none; a declared value that does not match the bytes is a permanent
+	// input failure.
+	RawSHA256 string
+	// SHA256 optionally declares the digest of CleanData, with the same rule.
 	SHA256 string
 }
 

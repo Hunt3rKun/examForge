@@ -235,7 +235,8 @@ func (r *Repository) AssetRecord(ctx context.Context, assetID string) (rec stora
 		if err != nil {
 			return err
 		}
-		rec = storage.AssetRecord{AssetID: row.AssetID, StorageKey: row.StorageKey, MediaType: row.MediaType, SHA256: row.Sha256}
+		rec = storage.AssetRecord{AssetID: row.AssetID, StorageKey: row.StorageKey, MediaType: row.MediaType, SHA256: row.Sha256,
+			RawStorageKey: row.RawStorageKey.String, RawSHA256: row.RawSha256.String}
 		return nil
 	})
 	return rec, Translate(err)

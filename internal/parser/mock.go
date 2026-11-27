@@ -111,8 +111,8 @@ func NewMockParserAdapter(opts ...MockOption) (*MockParserAdapter, error) {
 		m.assets = append(m.assets, AssetBlob{
 			AssetID:   id,
 			MediaType: m.exam.Assets[id].MediaType,
-			Data:      blob,
-			SHA256:    storage.HashBytes(blob),
+			RawData:   blob,
+			RawSHA256: storage.HashBytes(blob),
 		})
 	}
 	return m, nil
@@ -146,7 +146,8 @@ func (m *MockParserAdapter) Parse(ctx context.Context, source Source) (ParseResu
 		result.Assets = make([]AssetBlob, len(m.assets))
 		for i, blob := range m.assets {
 			result.Assets[i] = AssetBlob{AssetID: blob.AssetID, MediaType: blob.MediaType,
-				Data: append([]byte(nil), blob.Data...), SHA256: blob.SHA256}
+				RawData: append([]byte(nil), blob.RawData...), RawSHA256: blob.RawSHA256,
+				CleanData: append([]byte(nil), blob.CleanData...), SHA256: blob.SHA256}
 		}
 		return nil
 	}()

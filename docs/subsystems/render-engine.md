@@ -36,6 +36,13 @@ resolver that downloads each asset at most once (singleflight, bounded cache),
 so repeated references do not re-fetch. `cmd/exampipe` and
 `internal/pipeline/e2e_test.go` render persisted exams through it.
 
+Slice 3: `AssetRecord` additionally carries `RawStorageKey`/`RawSHA256`, and
+`ResolveRaw` opens the raw companion object verified against its own
+registered digest. A companion without a digest (a pre-migration row) is
+refused — the clean digest never verifies raw bytes. Rendering itself always
+reads the main object, so `raw_cropped` (main = raw) and `cleaned`
+(main = clean) assets both render unchanged.
+
 ### Fixtures
 
 - `testdata/golden/assets/` (`manifest.json`, `sample_fig.png`): golden assets.

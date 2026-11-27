@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"sort"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgtype"
@@ -46,6 +47,12 @@ type WorkerConfig struct {
 	UploadConcurrency int
 	// Secrets are scrubbed from every stored error message.
 	Secrets []string
+	// JobTimeout is the River per-job timeout this worker publishes through
+	// Timeout(). Zero keeps River's client-level default. A parser with a
+	// total parse budget must configure a JobTimeout strictly greater than
+	// that budget plus its worker reserve; the parser's own config validates
+	// the inequality.
+	JobTimeout time.Duration
 }
 
 // IngestWorker is the River worker for IngestArgs. It never holds a database
@@ -64,13 +71,16 @@ type IngestWorker struct {
 
 var _ river.Worker[IngestArgs] = (*IngestWorker)(nil)
 
+// Timeout publishes the configured per-job River timeout.
+func (w *IngestWorker) Timeout(*river.Job[IngestArgs]) time.Duration { return w.cfg.JobTimeout }
+
 // NewIngestWorker wires the worker.
 func NewIngestWorker(jobs JobStore, persistence Persistence, objects storage.ObjectStore,
 	adapter parser.ParserAdapter, validator *ir.Validator, canceller JobCanceller, cfg WorkerConfig) (*IngestWorker, error) {
 	switch {
 	case jobs == nil || persistence == nil || objects == nil || adapter == nil || validator == nil:
 		return nil, errors.New("pipeline: worker needs a job store, persistence, object store, parser and validator")
-	case cfg.MaxSourceBytes < 0 || cfg.MaxAssetBytes < 0 || cfg.UploadConcurrency < 0:
+	case cfg.MaxSourceBytes < 0 || cfg.MaxAssetBytes < 0 || cfg.UploadConcurrency < 0 || cfg.JobTimeout < 0:
 		return nil, errors.New("pipeline: worker limits must not be negative")
 	}
 	if cfg.MaxSourceBytes == 0 {
@@ -207,7 +217,7 @@ func (w *IngestWorker) uploadAssets(ctx context.Context, result parser.ParseResu
 			if !ok {
 				return Permanent(CodeAssetInvalid, fmt.Errorf("asset %q has no bytes", id))
 			}
-			upload, err := w.uploadOne(groupCtx, id, asset.MediaType, blob)
+			upload, err := w.uploadOne(groupCtx, asset, blob)
 			if err != nil {
 				return err
 			}
@@ -221,29 +231,78 @@ func (w *IngestWorker) uploadAssets(ctx context.Context, result parser.ParseResu
 	return verified, nil
 }
 
-func (w *IngestWorker) uploadOne(ctx context.Context, id, mediaType string, blob parser.AssetBlob) (store.VerifiedAsset, error) {
+// uploadOne verifies and uploads one asset's payload(s). The IR asset status
+// selects the shape: raw_cropped uploads the single raw object as the main
+// key; cleaned uploads two different objects, clean as the main key and raw
+// as the verified companion. Digests are recomputed from the bytes, never
+// taken from the parser's declaration.
+func (w *IngestWorker) uploadOne(ctx context.Context, asset ir.Asset, blob parser.AssetBlob) (store.VerifiedAsset, error) {
+	id, mediaType := asset.AssetID, asset.MediaType
 	if err := storage.ValidateAssetID(id); err != nil {
 		return store.VerifiedAsset{}, Permanent(CodeAssetInvalid, err)
 	}
-	if len(blob.Data) == 0 || int64(len(blob.Data)) > w.cfg.MaxAssetBytes {
-		return store.VerifiedAsset{}, Permanent(CodeAssetInvalid, fmt.Errorf("asset %q is %d bytes; limit %d", id, len(blob.Data), w.cfg.MaxAssetBytes))
+	if mediaType != blob.MediaType {
+		return store.VerifiedAsset{}, Permanent(CodeAssetInvalid, fmt.Errorf("asset %q is declared %q in the IR but its payload is %q", id, mediaType, blob.MediaType))
 	}
-	sum := storage.HashBytes(blob.Data)
-	if blob.SHA256 != "" && blob.SHA256 != sum {
-		return store.VerifiedAsset{}, Permanent(CodeAssetInvalid, fmt.Errorf("asset %q declares SHA-256 %s but its bytes hash to %s", id, blob.SHA256, sum))
-	}
-	if err := validateAssetBytes(mediaType, blob.Data); err != nil {
-		return store.VerifiedAsset{}, Permanent(CodeAssetInvalid, fmt.Errorf("asset %q: %w", id, err))
-	}
-	key, err := storage.RawAssetKey(id, mediaType)
-	if err != nil {
-		return store.VerifiedAsset{}, Permanent(CodeAssetInvalid, err)
-	}
-	got, err := storage.PutImmutable(ctx, w.objects, key, bytes.NewReader(blob.Data), int64(len(blob.Data)), mediaType, w.cfg.MaxAssetBytes)
+	rawSum, err := w.verifyVariant(id, "raw", mediaType, blob.RawData, blob.RawSHA256)
 	if err != nil {
 		return store.VerifiedAsset{}, err
 	}
-	return store.VerifiedAsset{AssetID: id, StorageKey: key, SHA256: got}, nil
+	rawKey, err := storage.RawAssetKey(id, mediaType)
+	if err != nil {
+		return store.VerifiedAsset{}, Permanent(CodeAssetInvalid, err)
+	}
+	switch asset.Status {
+	case "raw_cropped":
+		if len(blob.CleanData) != 0 || blob.SHA256 != "" {
+			return store.VerifiedAsset{}, Permanent(CodeAssetInvalid, fmt.Errorf("asset %q is raw_cropped but carries clean bytes", id))
+		}
+		got, err := storage.PutImmutable(ctx, w.objects, rawKey, bytes.NewReader(blob.RawData), int64(len(blob.RawData)), mediaType, w.cfg.MaxAssetBytes)
+		if err != nil {
+			return store.VerifiedAsset{}, err
+		}
+		return store.VerifiedAsset{AssetID: id, StorageKey: rawKey, SHA256: got}, nil
+	case "cleaned":
+		cleanSum, err := w.verifyVariant(id, "clean", mediaType, blob.CleanData, blob.SHA256)
+		if err != nil {
+			return store.VerifiedAsset{}, err
+		}
+		if cleanSum == rawSum {
+			// Copying the raw bytes as "clean" pretends a cleanup happened.
+			return store.VerifiedAsset{}, Permanent(CodeAssetInvalid, fmt.Errorf("asset %q is cleaned but its clean bytes equal the raw bytes", id))
+		}
+		cleanKey, err := storage.CleanAssetKey(id, mediaType)
+		if err != nil {
+			return store.VerifiedAsset{}, Permanent(CodeAssetInvalid, err)
+		}
+		gotRaw, err := storage.PutImmutable(ctx, w.objects, rawKey, bytes.NewReader(blob.RawData), int64(len(blob.RawData)), mediaType, w.cfg.MaxAssetBytes)
+		if err != nil {
+			return store.VerifiedAsset{}, err
+		}
+		gotClean, err := storage.PutImmutable(ctx, w.objects, cleanKey, bytes.NewReader(blob.CleanData), int64(len(blob.CleanData)), mediaType, w.cfg.MaxAssetBytes)
+		if err != nil {
+			return store.VerifiedAsset{}, err
+		}
+		return store.VerifiedAsset{AssetID: id, StorageKey: cleanKey, SHA256: gotClean, RawStorageKey: rawKey, RawSHA256: gotRaw}, nil
+	default:
+		return store.VerifiedAsset{}, Permanent(CodeAssetInvalid, fmt.Errorf("asset %q has unsupported status %q", id, asset.Status))
+	}
+}
+
+// verifyVariant checks one payload's size, declared digest and image bytes,
+// and returns the server-computed digest.
+func (w *IngestWorker) verifyVariant(id, variant, mediaType string, data []byte, declared string) (string, error) {
+	if len(data) == 0 || int64(len(data)) > w.cfg.MaxAssetBytes {
+		return "", Permanent(CodeAssetInvalid, fmt.Errorf("asset %q %s variant is %d bytes; limit %d", id, variant, len(data), w.cfg.MaxAssetBytes))
+	}
+	sum := storage.HashBytes(data)
+	if declared != "" && declared != sum {
+		return "", Permanent(CodeAssetInvalid, fmt.Errorf("asset %q %s variant declares SHA-256 %s but its bytes hash to %s", id, variant, declared, sum))
+	}
+	if err := validateAssetBytes(mediaType, data); err != nil {
+		return "", Permanent(CodeAssetInvalid, fmt.Errorf("asset %q %s variant: %w", id, variant, err))
+	}
+	return sum, nil
 }
 
 // move performs one conditional state update and turns a no-match into an

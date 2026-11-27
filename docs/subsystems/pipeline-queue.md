@@ -1,14 +1,19 @@
 # Pipeline and queue — current-state contract
 
-## Implemented (MVP slice 2)
+## Implemented (MVP slices 2 + 3)
 
 The ingest pipeline is PostgreSQL + River + S3-protocol object storage, fully
-offline-testable through in-memory fakes. There is no HTTP API, frontend,
-real VLM/OCR client, or DOCX output in this slice.
+offline-testable through in-memory fakes. Slice 3 adds the cloud vision parser
+behind the same `ParserAdapter` seam and dual-object (raw + clean) asset
+persistence. There is no HTTP API, frontend, or DOCX output in this slice.
 
 ### Layout
 
-- `migrations/0001_assets.sql` … `0004_exams.sql`: application schema. River
+- `migrations/0001_assets.sql` … `0005_asset_raw_digest.sql`: application
+  schema. `0005` adds nullable `assets.raw_sha256` (pre-migration rows keep
+  NULL; no digest is fabricated) and the `assets_raw_digest_needs_key` CHECK
+  (a digest requires a companion key; the converse is intentionally not
+  constrained so legacy rows survive). River
   tables are never created here; `rivermigrate` owns them. `migrations.go`
   embeds `migrations/*.sql` as `examforge.Migrations` for the runner and the
   CLI.
@@ -37,22 +42,39 @@ real VLM/OCR client, or DOCX output in this slice.
 - `internal/store/storetest/`: `MemDB`, an in-memory `Workspace`/`IngestJobs`
   with snapshot rollback and fault injection, plus an in-memory `Persister`.
   It mirrors schema keys; real SQL is exercised only by integration tests.
-- `internal/parser/`: `ParserAdapter` boundary (`Source`, `AssetBlob`,
-  `ParseResult`, `Error` with permanent/transient classes), `ReadSource`, and
-  `MockParserAdapter` with fault hooks (`FromGolden`, `InvalidTimes`,
-  `FailTimes`, `DuplicateQuestions`, `Delay`, `Mutate`).
+- `internal/parser/`: `ParserAdapter` boundary (`Source`, dual-variant
+  `AssetBlob{RawData, CleanData, RawSHA256, SHA256}`, `ParseResult`, `Error`
+  with permanent/transient classes), `ReadSource`, and `MockParserAdapter`
+  with fault hooks (`FromGolden`, `InvalidTimes`, `FailTimes`,
+  `DuplicateQuestions`, `Delay`, `Mutate`).
+- `internal/parser/cloud/` + `internal/vision/raster/` + `internal/vision/clean/`:
+  the slice-3 vision parser (see `docs/subsystems/vision-parser.md`). The
+  worker consumes its output through the identical seam.
 - `internal/pipeline/`: `Submitter` (bounded source read, `%PDF-` check,
   deterministic upload key, one transaction for the `ingest_jobs` row + River
-  `InsertTx` + `river_job_id`), `IngestWorker` (River `WorkerDefaults`),
-  `PGXRunner`/`RiverClient` adapters, `RiverMigrate`/`RiverVersion`,
-  state machine, and permanent/transient classification.
+  `InsertTx` + `river_job_id`), `IngestWorker` (River `WorkerDefaults` plus a
+  `Timeout` override from `WorkerConfig.JobTimeout`), `PGXRunner`/`RiverClient`
+  adapters, `RiverMigrate`/`RiverVersion`, state machine, and
+  permanent/transient classification. Asset uploads are status-driven:
+  `raw_cropped` writes one object (main key = raw key); `cleaned` writes two
+  different objects with independently recomputed digests
+  (`VerifiedAsset.SHA256` for clean, `RawSHA256` for raw); identical raw/clean
+  bytes, missing variants, declared-digest mismatches and media-type
+  mismatches are permanent `asset_invalid` failures.
 - `cmd/exampipe/main.go`: operator CLI (environment-only configuration) that
   migrates, submits, works one job, assembles the stored exam and renders a
-  PDF through `S3AssetResolver`. Never part of the offline gate.
+  PDF through `S3AssetResolver`. `-parser mock|cloud` selects the adapter
+  explicitly; `cloud` requires the complete `EXAMFORGE_VLM_*` environment
+  (checked before any service connection), takes `-parse-budget` and
+  `-job-timeout` (the cloud config enforces budget + reserve < job timeout),
+  and prints bounded parse diagnostics (pages, stage times, usage, repair
+  rounds, warnings). The API key is never a flag and never printed. Never
+  part of the offline gate.
 
 ### Schema
 
-`assets` (`asset_id` PK, `storage_key` unique, `sha256`, status/geometry
+`assets` (`asset_id` PK, `storage_key` unique, `sha256`, nullable
+`raw_sha256` with the `assets_raw_digest_needs_key` CHECK, status/geometry
 checks), `questions` (`question_id` UUID PK, `content_json` complete
 `QuestionItem`, `content_fingerprint` + `fingerprint_version`, non-unique
 fingerprint index), `ingest_jobs` (`state` CHECK, `river_job_id` unique,
@@ -69,6 +91,15 @@ re-reads the winner's row, and applies the same SHA-256 and identity rules
 SHA-256 or identity metadata is `ErrConflict` and never overwrites the
 registered row. This keeps content-addressed asset registration idempotent
 without a transaction-level lock.
+
+Dual-digest rules (slice 3): a new `cleaned` record must carry both a raw
+companion key and a valid raw digest; a `raw_cropped` record must carry
+neither. When an existing row and the incoming record both declare a raw
+digest, a difference is `ErrConflict`. A legacy row (`raw_sha256 IS NULL`)
+keeps its stored shape — no digest is fabricated — and only its main object
+stays authoritative; `S3AssetResolver.ResolveRaw` refuses a companion without
+its own registered digest and never verifies raw bytes against the clean
+digest.
 
 ### Ingest state machine
 
@@ -132,10 +163,26 @@ error messages.
   shared, so they are left in place.
 - `internal/pipeline/e2e_test.go` is the offline end-to-end proof: in-memory
   store and DB, mock parser, real Typst render through the resolver.
+- `internal/pipeline/cloudE2E_test.go` extends that proof to slice 3: real
+  mutool rasterization (or a synthetic dirty page), a localhost httptest VLM,
+  the cloud parser, dual-object worker uploads, assembly and a real Typst
+  render — for both the `raw_cropped` fallback and the `cleaned` path.
+- `internal/pipeline/dualasset_test.go` and `internal/store/dualasset_test.go`
+  cover the dual-payload rejection matrix, independent digest storage, raw
+  digest conflicts and legacy-row behavior offline;
+  `internal/storage/rawresolver_test.go` covers `ResolveRaw`.
+- `internal/pipeline/dualasset_integration_test.go`
+  (`//go:build integration`) proves against real PostgreSQL + S3: cleaned
+  dual digests verify their own objects, the migration keeps legacy rows
+  NULL with the main object readable and raw reads refused, and the
+  `assets_raw_digest_needs_key` CHECK rejects a digest without a key.
 
 ## Boundaries
 
 The `Submitter`, worker, parser, and object store sit behind interfaces so the
-offline gate never needs PostgreSQL, S3, or network access. Future HTTP
-handlers and a real parser replace the seams, not the state machine. Queue
-families beyond ingestion (asset processing, rendering) are not implemented.
+offline gate never needs PostgreSQL, S3, or network access. The cloud parser
+is one such seam implementation; future HTTP handlers replace the CLI, not
+the state machine. Queue families beyond ingestion (asset processing,
+rendering) are not implemented. River retries re-run the whole parse: there
+is no cross-attempt page-result cache, so a retried job may bill provider
+tokens again.

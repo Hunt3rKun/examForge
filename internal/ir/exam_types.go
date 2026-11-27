@@ -11,6 +11,10 @@ type ExamDocumentIR struct {
 	Metadata      ExamMetadata     `json:"metadata"`
 	Assets        map[string]Asset `json:"assets"`
 	Sections      []Section        `json:"sections"`
+	// Warnings carries bounded parser/processing observations (e.g. a cleaner
+	// fallback). It is exchange metadata only: persistence does not store it
+	// and validation does not require it.
+	Warnings []string `json:"warnings,omitempty"`
 }
 
 type ExamMetadata struct {

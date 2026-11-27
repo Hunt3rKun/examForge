@@ -35,4 +35,5 @@ require (
 	github.com/tidwall/pretty v1.2.1 // indirect
 	github.com/tidwall/sjson v1.2.5 // indirect
 	golang.org/x/text v0.44.0 // indirect
+	golang.org/x/time v0.16.0 // indirect
 )
