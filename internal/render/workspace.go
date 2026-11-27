@@ -61,11 +61,17 @@ func (r *TypstRenderer) Render(ctx context.Context, exam ir.ExamDocumentIR, layo
 	}
 	defer func() { <-r.sem }()
 
-	ws, cleanup, err := r.assemble(ctx, exam, payload)
+	// A persistent renderer may serve many requests. Give each render a fresh
+	// resolver scope so cached bytes and selectors never leak across documents.
+	renderer := *r
+	if scoped, ok := r.resolver.(RenderScopedResolver); ok {
+		renderer.resolver = scoped.ForRender()
+	}
+	ws, cleanup, err := renderer.assemble(ctx, exam, payload)
 	if err != nil {
 		return nil, err
 	}
-	artifact, err := r.compile(ctx, ws, payload)
+	artifact, err := renderer.compile(ctx, ws, payload)
 	// Success, compile failure, cancellation: the workspace is always removed,
 	// and its removal is reported when it fails.
 	if cerr := cleanup(); cerr != nil && err == nil {

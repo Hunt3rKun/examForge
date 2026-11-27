@@ -11,12 +11,52 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
+const deleteQuestionIfUnreferenced = `-- name: DeleteQuestionIfUnreferenced :execrows
+DELETE FROM questions q
+WHERE q.question_id = $1
+  AND NOT EXISTS (SELECT 1 FROM exam_items i WHERE i.question_id = q.question_id)
+`
+
+// Removes an entity the edit path orphaned. The NOT EXISTS guard makes the
+// delete safe even if another item attached in the meantime.
+func (q *Queries) DeleteQuestionIfUnreferenced(ctx context.Context, questionID pgtype.UUID) (int64, error) {
+	result, err := q.db.Exec(ctx, deleteQuestionIfUnreferenced, questionID)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
 const getQuestion = `-- name: GetQuestion :one
 SELECT question_id, subject, grade_level, kind, question_type, knowledge_points, difficulty, content_fingerprint, fingerprint_version, content_json, created_at, updated_at FROM questions WHERE question_id = $1
 `
 
 func (q *Queries) GetQuestion(ctx context.Context, questionID pgtype.UUID) (Question, error) {
 	row := q.db.QueryRow(ctx, getQuestion, questionID)
+	var i Question
+	err := row.Scan(
+		&i.QuestionID,
+		&i.Subject,
+		&i.GradeLevel,
+		&i.Kind,
+		&i.QuestionType,
+		&i.KnowledgePoints,
+		&i.Difficulty,
+		&i.ContentFingerprint,
+		&i.FingerprintVersion,
+		&i.ContentJson,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
+}
+
+const getQuestionForUpdate = `-- name: GetQuestionForUpdate :one
+SELECT question_id, subject, grade_level, kind, question_type, knowledge_points, difficulty, content_fingerprint, fingerprint_version, content_json, created_at, updated_at FROM questions WHERE question_id = $1 FOR UPDATE
+`
+
+func (q *Queries) GetQuestionForUpdate(ctx context.Context, questionID pgtype.UUID) (Question, error) {
+	row := q.db.QueryRow(ctx, getQuestionForUpdate, questionID)
 	var i Question
 	err := row.Scan(
 		&i.QuestionID,
@@ -165,4 +205,137 @@ func (q *Queries) ListQuestionsByFingerprint(ctx context.Context, arg ListQuesti
 		return nil, err
 	}
 	return items, nil
+}
+
+const listQuestionsByFingerprintForUpdate = `-- name: ListQuestionsByFingerprintForUpdate :many
+SELECT question_id, subject, grade_level, kind, question_type, knowledge_points, difficulty, content_fingerprint, fingerprint_version, content_json, created_at, updated_at FROM questions
+WHERE content_fingerprint = $1 AND fingerprint_version = $2
+ORDER BY question_id
+FOR UPDATE
+`
+
+type ListQuestionsByFingerprintForUpdateParams struct {
+	ContentFingerprint string
+	FingerprintVersion int16
+}
+
+// The same candidate lookup under a row lock, in question_id order. Every
+// path that adds an exam_items reference takes this lock first, and the edit
+// path takes it before counting references, so the count cannot miss a
+// concurrent attach. The fixed order prevents deadlocks between two writers.
+func (q *Queries) ListQuestionsByFingerprintForUpdate(ctx context.Context, arg ListQuestionsByFingerprintForUpdateParams) ([]Question, error) {
+	rows, err := q.db.Query(ctx, listQuestionsByFingerprintForUpdate, arg.ContentFingerprint, arg.FingerprintVersion)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []Question{}
+	for rows.Next() {
+		var i Question
+		if err := rows.Scan(
+			&i.QuestionID,
+			&i.Subject,
+			&i.GradeLevel,
+			&i.Kind,
+			&i.QuestionType,
+			&i.KnowledgePoints,
+			&i.Difficulty,
+			&i.ContentFingerprint,
+			&i.FingerprintVersion,
+			&i.ContentJson,
+			&i.CreatedAt,
+			&i.UpdatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const lockQuestions = `-- name: LockQuestions :many
+SELECT question_id FROM questions
+WHERE question_id = ANY($1::uuid[])
+ORDER BY question_id
+FOR UPDATE
+`
+
+// Row locks for the reference protocol. Every path that adds or moves an
+// exam_items reference takes these locks in sorted question_id order before
+// touching the reference, so a reference count and a relink can never
+// interleave. New rows inserted by the same transaction are already locked.
+func (q *Queries) LockQuestions(ctx context.Context, questionIds []pgtype.UUID) ([]pgtype.UUID, error) {
+	rows, err := q.db.Query(ctx, lockQuestions, questionIds)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []pgtype.UUID{}
+	for rows.Next() {
+		var question_id pgtype.UUID
+		if err := rows.Scan(&question_id); err != nil {
+			return nil, err
+		}
+		items = append(items, question_id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const updateQuestion = `-- name: UpdateQuestion :one
+UPDATE questions
+SET subject = $2, grade_level = $3, kind = $4, question_type = $5,
+    knowledge_points = $6, difficulty = $7, content_fingerprint = $8,
+    fingerprint_version = $9, content_json = $10, updated_at = now()
+WHERE question_id = $1
+RETURNING question_id, subject, grade_level, kind, question_type, knowledge_points, difficulty, content_fingerprint, fingerprint_version, content_json, created_at, updated_at
+`
+
+type UpdateQuestionParams struct {
+	QuestionID         pgtype.UUID
+	Subject            string
+	GradeLevel         pgtype.Text
+	Kind               string
+	QuestionType       pgtype.Text
+	KnowledgePoints    []string
+	Difficulty         pgtype.Float8
+	ContentFingerprint string
+	FingerprintVersion int16
+	ContentJson        []byte
+}
+
+func (q *Queries) UpdateQuestion(ctx context.Context, arg UpdateQuestionParams) (Question, error) {
+	row := q.db.QueryRow(ctx, updateQuestion,
+		arg.QuestionID,
+		arg.Subject,
+		arg.GradeLevel,
+		arg.Kind,
+		arg.QuestionType,
+		arg.KnowledgePoints,
+		arg.Difficulty,
+		arg.ContentFingerprint,
+		arg.FingerprintVersion,
+		arg.ContentJson,
+	)
+	var i Question
+	err := row.Scan(
+		&i.QuestionID,
+		&i.Subject,
+		&i.GradeLevel,
+		&i.Kind,
+		&i.QuestionType,
+		&i.KnowledgePoints,
+		&i.Difficulty,
+		&i.ContentFingerprint,
+		&i.FingerprintVersion,
+		&i.ContentJson,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
 }

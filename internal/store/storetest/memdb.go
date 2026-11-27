@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"sort"
 	"sync"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgtype"
@@ -19,8 +20,9 @@ import (
 	"examforge/internal/store/sqlcgen"
 )
 
-// MemDB is an in-memory Workspace with the schema's unique keys and
-// references. It is safe for concurrent use.
+// MemDB is an in-memory Workspace with the schema's unique keys, CHECK
+// constraints and the reference-lock observation hook. It is safe for
+// concurrent use.
 type MemDB struct {
 	mu        sync.Mutex
 	assets    map[string]sqlcgen.Asset
@@ -41,6 +43,21 @@ type MemDB struct {
 	// then hits the real conflict path (no row returned) instead of the
 	// already-exists path, so the conflict handling is exercised offline.
 	assetRaces map[string]sqlcgen.Asset
+
+	// seq orders CreatedAt values, so keyset pagination has distinct sort keys
+	// the way a real table's timestamps do.
+	seq int64
+
+	// OnLockQuestions runs just before LockQuestions takes its rows, modelling
+	// an ingest whose attach committed immediately before the lock was
+	// granted. Code that counts references before locking sees the old count;
+	// code that locks first sees the attach. The hook runs without m.mu held,
+	// so it may call the store's own methods.
+	OnLockQuestions func(questionID pgtype.UUID)
+
+	// lockLog records LockQuestions calls in order, for assertions that the
+	// reference protocol locked before counting and before the item write.
+	lockLog []pgtype.UUID
 }
 
 // RaceAsset makes the next InsertAsset for assetID behave as if another
@@ -98,6 +115,7 @@ func (m *MemDB) Clone() *MemDB {
 		sections:  cloneMap(m.sections),
 		items:     cloneMap(m.items),
 		jobs:      cloneMap(m.jobs),
+		seq:       m.seq,
 	}
 }
 
@@ -108,6 +126,15 @@ func (m *MemDB) Restore(snapshot *MemDB) {
 	defer m.mu.Unlock()
 	m.assets, m.questions, m.exams, m.sections, m.items, m.jobs =
 		fresh.assets, fresh.questions, fresh.exams, fresh.sections, fresh.items, fresh.jobs
+	m.seq = fresh.seq
+}
+
+// stampLocked returns a distinct, increasing created_at. Must be called with
+// mu held. Real rows get now(); the fake needs distinct values only so keyset
+// pagination has a stable total order.
+func (m *MemDB) stampLocked() pgtype.Timestamptz {
+	m.seq++
+	return pgtype.Timestamptz{Time: time.Unix(1700000000, m.seq*1000), Valid: true}
 }
 
 func cloneMap[K comparable, V any](src map[K]V) map[K]V {
@@ -223,12 +250,52 @@ func (m *MemDB) InsertAsset(_ context.Context, arg sqlcgen.InsertAssetParams) (s
 	if arg.RawSha256.Valid && !storage.ValidSHA256(arg.RawSha256.String) {
 		return sqlcgen.Asset{}, fmt.Errorf("%w: constraint assets_raw_sha256_check", store.ErrInvalid)
 	}
+	// Mirror assets_clean_digest_needs_key and the clean digest CHECK.
+	if arg.CleanSha256.Valid && !arg.CleanStorageKey.Valid {
+		return sqlcgen.Asset{}, fmt.Errorf("%w: constraint assets_clean_digest_needs_key", store.ErrInvalid)
+	}
+	if arg.CleanSha256.Valid && !storage.ValidSHA256(arg.CleanSha256.String) {
+		return sqlcgen.Asset{}, fmt.Errorf("%w: constraint assets_clean_sha256_check", store.ErrInvalid)
+	}
+	// Mirror assets_active_variant_check: only the two selector values exist.
+	if arg.ActiveVariant != "raw" && arg.ActiveVariant != "clean" {
+		return sqlcgen.Asset{}, fmt.Errorf("%w: constraint assets_active_variant_check", store.ErrInvalid)
+	}
 	row := sqlcgen.Asset{
 		AssetID: arg.AssetID, MediaType: arg.MediaType, StorageKey: arg.StorageKey, RawStorageKey: arg.RawStorageKey,
 		Status: arg.Status, AspectRatio: arg.AspectRatio, SuggestedWidthMm: arg.SuggestedWidthMm,
 		Caption: arg.Caption, Alt: arg.Alt, SourceBbox: append([]byte(nil), arg.SourceBbox...), Sha256: arg.Sha256,
-		RawSha256: arg.RawSha256,
+		RawSha256: arg.RawSha256, CleanStorageKey: arg.CleanStorageKey, CleanSha256: arg.CleanSha256,
+		ActiveVariant: arg.ActiveVariant, Revision: 1,
 	}
+	m.assets[arg.AssetID] = row
+	return row, nil
+}
+
+// GetAssetForUpdate mirrors SELECT ... FOR UPDATE. The fake's mutex is the row
+// lock; a caller cannot hold it across statements, so the compare-and-set in
+// SetAssetActiveVariant is what enforces the conditional write.
+func (m *MemDB) GetAssetForUpdate(ctx context.Context, assetID string) (sqlcgen.Asset, error) {
+	return m.GetAsset(ctx, assetID)
+}
+
+// SetAssetActiveVariant is the revision compare-and-set. A stale revision
+// updates no row: ErrNotFound, exactly like the SQL's WHERE revision = $3.
+func (m *MemDB) SetAssetActiveVariant(_ context.Context, arg sqlcgen.SetAssetActiveVariantParams) (sqlcgen.Asset, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if err := m.fail(); err != nil {
+		return sqlcgen.Asset{}, err
+	}
+	if arg.ActiveVariant != "raw" && arg.ActiveVariant != "clean" {
+		return sqlcgen.Asset{}, fmt.Errorf("%w: constraint assets_active_variant_check", store.ErrInvalid)
+	}
+	row, ok := m.assets[arg.AssetID]
+	if !ok || row.Revision != arg.Revision {
+		return sqlcgen.Asset{}, store.ErrNotFound
+	}
+	row.ActiveVariant = arg.ActiveVariant
+	row.Revision++
 	m.assets[arg.AssetID] = row
 	return row, nil
 }
@@ -292,14 +359,100 @@ func (m *MemDB) ListQuestions(_ context.Context, questionIDs []pgtype.UUID) ([]s
 func (m *MemDB) ListQuestionsByFingerprint(_ context.Context, arg sqlcgen.ListQuestionsByFingerprintParams) ([]sqlcgen.Question, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	return m.byFingerprintLocked(arg.ContentFingerprint, arg.FingerprintVersion), nil
+}
+
+func (m *MemDB) ListQuestionsByFingerprintForUpdate(_ context.Context, arg sqlcgen.ListQuestionsByFingerprintForUpdateParams) ([]sqlcgen.Question, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.byFingerprintLocked(arg.ContentFingerprint, arg.FingerprintVersion), nil
+}
+
+func (m *MemDB) byFingerprintLocked(fingerprint string, version int16) []sqlcgen.Question {
 	var out []sqlcgen.Question
 	for id, row := range m.questions {
-		if row.ContentFingerprint == arg.ContentFingerprint && row.FingerprintVersion == arg.FingerprintVersion {
+		if row.ContentFingerprint == fingerprint && row.FingerprintVersion == version {
 			out = append(out, m.questions[id])
 		}
 	}
 	sort.Slice(out, func(i, j int) bool { return uuidString(out[i].QuestionID) < uuidString(out[j].QuestionID) })
+	return out
+}
+
+func (m *MemDB) GetQuestionForUpdate(ctx context.Context, id pgtype.UUID) (sqlcgen.Question, error) {
+	return m.GetQuestion(ctx, id)
+}
+
+// LockQuestions records the lock and, when a hook is installed, runs it before
+// returning: the hook models an attach that committed just before the lock was
+// granted. Rows are returned in question_id order like the SQL's ORDER BY.
+func (m *MemDB) LockQuestions(_ context.Context, questionIDs []pgtype.UUID) ([]pgtype.UUID, error) {
+	hook := m.OnLockQuestions
+	ids := append([]pgtype.UUID(nil), questionIDs...)
+	sort.Slice(ids, func(i, j int) bool { return uuidString(ids[i]) < uuidString(ids[j]) })
+	if hook != nil {
+		for _, id := range ids {
+			hook(id)
+		}
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.lockLog = append(m.lockLog, ids...)
+	var out []pgtype.UUID
+	for _, id := range ids {
+		if _, ok := m.questions[id]; ok {
+			out = append(out, id)
+		}
+	}
 	return out, nil
+}
+
+// LockLog returns the question IDs locked so far, in call order.
+func (m *MemDB) LockLog() []pgtype.UUID {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return append([]pgtype.UUID(nil), m.lockLog...)
+}
+
+func (m *MemDB) UpdateQuestion(_ context.Context, arg sqlcgen.UpdateQuestionParams) (sqlcgen.Question, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if err := m.fail(); err != nil {
+		return sqlcgen.Question{}, err
+	}
+	row, ok := m.questions[arg.QuestionID]
+	if !ok {
+		return sqlcgen.Question{}, store.ErrNotFound
+	}
+	if arg.KnowledgePoints == nil {
+		return sqlcgen.Question{}, fmt.Errorf("%w: knowledge_points is null", store.ErrInvalid)
+	}
+	row.Subject, row.GradeLevel, row.Kind = arg.Subject, arg.GradeLevel, arg.Kind
+	row.QuestionType, row.KnowledgePoints, row.Difficulty = arg.QuestionType, arg.KnowledgePoints, arg.Difficulty
+	row.ContentFingerprint, row.FingerprintVersion = arg.ContentFingerprint, arg.FingerprintVersion
+	row.ContentJson = append([]byte(nil), arg.ContentJson...)
+	m.questions[arg.QuestionID] = row
+	return row, nil
+}
+
+// DeleteQuestionIfUnreferenced mirrors the NOT EXISTS guard: a referenced
+// entity is never deleted, and zero rows are affected.
+func (m *MemDB) DeleteQuestionIfUnreferenced(_ context.Context, id pgtype.UUID) (int64, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if err := m.fail(); err != nil {
+		return 0, err
+	}
+	if _, ok := m.questions[id]; !ok {
+		return 0, nil
+	}
+	for _, item := range m.items {
+		if item.QuestionID == id {
+			return 0, nil
+		}
+	}
+	delete(m.questions, id)
+	return 1, nil
 }
 
 func (m *MemDB) InsertQuestion(_ context.Context, arg sqlcgen.InsertQuestionParams) (sqlcgen.Question, error) {
@@ -365,9 +518,17 @@ func (m *MemDB) InsertExam(_ context.Context, arg sqlcgen.InsertExamParams) (sql
 		ExamID: newID(), IrExamID: arg.IrExamID, IngestJobID: arg.IngestJobID,
 		SourceFileSha256: arg.SourceFileSha256, SourcePdfKey: arg.SourcePdfKey,
 		SchemaVersion: arg.SchemaVersion, MetadataJson: append([]byte(nil), arg.MetadataJson...),
+		CreatedAt: m.stampLocked(),
 	}
 	m.exams[row.ExamID] = row
 	return row, nil
+}
+
+// GetExamForUpdate mirrors SELECT ... FOR UPDATE; the fake's mutex is the row
+// lock, and the compare-and-set on the item revision is what makes a stale
+// If-Match fail.
+func (m *MemDB) GetExamForUpdate(ctx context.Context, id pgtype.UUID) (sqlcgen.Exam, error) {
+	return m.GetExam(ctx, id)
 }
 
 func (m *MemDB) UpdateExam(_ context.Context, arg sqlcgen.UpdateExamParams) (sqlcgen.Exam, error) {
@@ -448,11 +609,71 @@ func (m *MemDB) InsertItem(_ context.Context, arg sqlcgen.InsertItemParams) erro
 			return conflict("exam_items unique")
 		}
 	}
-	m.items[newID()] = sqlcgen.ExamItem{
-		SectionID: arg.SectionID, QuestionID: arg.QuestionID, Ordinal: arg.Ordinal,
+	itemID := newID()
+	m.items[itemID] = sqlcgen.ExamItem{
+		ItemID: itemID, SectionID: arg.SectionID, QuestionID: arg.QuestionID, Ordinal: arg.Ordinal,
 		DisplayNumberOverride: arg.DisplayNumberOverride, ScoreOverride: arg.ScoreOverride,
+		AnswerSpaceMmOverride: arg.AnswerSpaceMmOverride, Revision: 1,
 	}
 	return nil
+}
+
+// GetExamItemForUpdate mirrors the join that carries the owning exam ID, so a
+// caller can verify the item belongs to the exam on the path.
+func (m *MemDB) GetExamItemForUpdate(_ context.Context, itemID pgtype.UUID) (sqlcgen.GetExamItemForUpdateRow, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	item, ok := m.items[itemID]
+	if !ok {
+		return sqlcgen.GetExamItemForUpdateRow{}, store.ErrNotFound
+	}
+	section, ok := m.sections[item.SectionID]
+	if !ok {
+		return sqlcgen.GetExamItemForUpdateRow{}, store.ErrNotFound
+	}
+	return sqlcgen.GetExamItemForUpdateRow{
+		ItemID: item.ItemID, SectionID: item.SectionID, QuestionID: item.QuestionID, Ordinal: item.Ordinal,
+		DisplayNumberOverride: item.DisplayNumberOverride, ScoreOverride: item.ScoreOverride,
+		AnswerSpaceMmOverride: item.AnswerSpaceMmOverride, Revision: item.Revision, ExamID: section.ExamID,
+	}, nil
+}
+
+// CountQuestionReferences counts every occurrence of one entity across all
+// exams, shared or not.
+func (m *MemDB) CountQuestionReferences(_ context.Context, questionID pgtype.UUID) (int64, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	var count int64
+	for _, item := range m.items {
+		if item.QuestionID == questionID {
+			count++
+		}
+	}
+	return count, nil
+}
+
+// UpdateItem is the edit statement's revision compare-and-set: a stale
+// revision updates no row.
+func (m *MemDB) UpdateItem(_ context.Context, arg sqlcgen.UpdateItemParams) (sqlcgen.ExamItem, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if err := m.fail(); err != nil {
+		return sqlcgen.ExamItem{}, err
+	}
+	item, ok := m.items[arg.ItemID]
+	if !ok || item.Revision != arg.Revision {
+		return sqlcgen.ExamItem{}, store.ErrNotFound
+	}
+	if _, ok := m.questions[arg.QuestionID]; !ok {
+		return sqlcgen.ExamItem{}, conflict("exam_items_question_id_fkey")
+	}
+	item.QuestionID = arg.QuestionID
+	item.DisplayNumberOverride = arg.DisplayNumberOverride
+	item.ScoreOverride = arg.ScoreOverride
+	item.AnswerSpaceMmOverride = arg.AnswerSpaceMmOverride
+	item.Revision++
+	m.items[arg.ItemID] = item
+	return item, nil
 }
 
 func (m *MemDB) ListSections(_ context.Context, examID pgtype.UUID) ([]sqlcgen.ExamSection, error) {
@@ -481,6 +702,79 @@ func (m *MemDB) ListItems(_ context.Context, sectionID pgtype.UUID) ([]sqlcgen.E
 	return out, nil
 }
 
+// ListExamItems returns every occurrence of one exam in IR order: section
+// ordinal, then item ordinal.
+func (m *MemDB) ListExamItems(_ context.Context, examID pgtype.UUID) ([]sqlcgen.ExamItem, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	ordinals := map[pgtype.UUID]int32{}
+	for id, sec := range m.sections {
+		if sec.ExamID == examID {
+			ordinals[id] = sec.Ordinal
+		}
+	}
+	var out []sqlcgen.ExamItem
+	for _, item := range m.items {
+		if _, ok := ordinals[item.SectionID]; ok {
+			out = append(out, item)
+		}
+	}
+	sort.Slice(out, func(i, j int) bool {
+		si, sj := ordinals[out[i].SectionID], ordinals[out[j].SectionID]
+		if si != sj {
+			return si < sj
+		}
+		return out[i].Ordinal < out[j].Ordinal
+	})
+	return out, nil
+}
+
+// ListQuestionReferenceCounts counts occurrences per question, omitting
+// questions with no reference like the SQL's GROUP BY does.
+func (m *MemDB) ListQuestionReferenceCounts(_ context.Context, questionIDs []pgtype.UUID) ([]sqlcgen.ListQuestionReferenceCountsRow, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	want := map[pgtype.UUID]bool{}
+	for _, id := range questionIDs {
+		want[id] = true
+	}
+	counts := map[pgtype.UUID]int64{}
+	for _, item := range m.items {
+		if want[item.QuestionID] {
+			counts[item.QuestionID]++
+		}
+	}
+	out := make([]sqlcgen.ListQuestionReferenceCountsRow, 0, len(counts))
+	for id, count := range counts {
+		out = append(out, sqlcgen.ListQuestionReferenceCountsRow{QuestionID: id, References: count})
+	}
+	sort.Slice(out, func(i, j int) bool { return uuidString(out[i].QuestionID) < uuidString(out[j].QuestionID) })
+	return out, nil
+}
+
+// ListExamsPage mirrors the keyset page: (created_at, exam_id) < cursor,
+// ordered created_at DESC, exam_id DESC. A NULL cursor starts at the newest.
+func (m *MemDB) ListExamsPage(_ context.Context, arg sqlcgen.ListExamsPageParams) ([]sqlcgen.Exam, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	var out []sqlcgen.Exam
+	for _, row := range m.exams {
+		if beforeCursor(row.CreatedAt, row.ExamID, arg.CursorCreatedAt, arg.CursorExamID) {
+			out = append(out, row)
+		}
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if !out[i].CreatedAt.Time.Equal(out[j].CreatedAt.Time) {
+			return out[i].CreatedAt.Time.After(out[j].CreatedAt.Time)
+		}
+		return uuidString(out[i].ExamID) > uuidString(out[j].ExamID)
+	})
+	if arg.PageLimit >= 0 && int(arg.PageLimit) < len(out) {
+		out = out[:arg.PageLimit]
+	}
+	return out, nil
+}
+
 // ── ingest jobs (compare-and-set on state) ───────────────────────────────────
 
 func (m *MemDB) InsertIngestJob(_ context.Context, arg sqlcgen.InsertIngestJobParams) (sqlcgen.IngestJob, error) {
@@ -494,9 +788,35 @@ func (m *MemDB) InsertIngestJob(_ context.Context, arg sqlcgen.InsertIngestJobPa
 	}
 	row := sqlcgen.IngestJob{
 		JobID: arg.JobID, SourcePdfKey: arg.SourcePdfKey, SourceFileSha256: arg.SourceFileSha256, State: store.JobQueued,
+		CreatedAt: m.stampLocked(),
 	}
 	m.jobs[arg.JobID] = row
 	return row, nil
+}
+
+// ListIngestJobsPage mirrors the keyset page with the optional state filter.
+func (m *MemDB) ListIngestJobsPage(_ context.Context, arg sqlcgen.ListIngestJobsPageParams) ([]sqlcgen.IngestJob, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	var out []sqlcgen.IngestJob
+	for _, row := range m.jobs {
+		if arg.State.Valid && row.State != arg.State.String {
+			continue
+		}
+		if beforeCursor(row.CreatedAt, row.JobID, arg.CursorCreatedAt, arg.CursorJobID) {
+			out = append(out, row)
+		}
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if !out[i].CreatedAt.Time.Equal(out[j].CreatedAt.Time) {
+			return out[i].CreatedAt.Time.After(out[j].CreatedAt.Time)
+		}
+		return uuidString(out[i].JobID) > uuidString(out[j].JobID)
+	})
+	if arg.PageLimit >= 0 && int(arg.PageLimit) < len(out) {
+		out = out[:arg.PageLimit]
+	}
+	return out, nil
 }
 
 func (m *MemDB) SetRiverJobID(_ context.Context, arg sqlcgen.SetRiverJobIDParams) (int64, error) {
@@ -673,6 +993,21 @@ func contains(list []string, want string) bool {
 	return false
 }
 
+// beforeCursor implements the tuple comparison (created_at, id) < (cursor,
+// cursorID) with a NULL cursor meaning "before every row".
+func beforeCursor(created pgtype.Timestamptz, id pgtype.UUID, cursorCreated pgtype.Timestamptz, cursorID pgtype.UUID) bool {
+	if !cursorCreated.Valid {
+		return true
+	}
+	if !created.Time.Equal(cursorCreated.Time) {
+		return created.Time.Before(cursorCreated.Time)
+	}
+	if !cursorID.Valid {
+		return true
+	}
+	return uuidString(id) < uuidString(cursorID)
+}
+
 func containsQuestion(list []sqlcgen.Question, row sqlcgen.Question) bool {
 	for _, item := range list {
 		if item.QuestionID == row.QuestionID {
@@ -717,12 +1052,13 @@ func (p *Persister) Persist(ctx context.Context, exam ir.ExamDocumentIR, source 
 	return rec, err
 }
 
-// AssetRecord implements storage.AssetLookup over the in-memory rows.
+// AssetRecord implements storage.AssetLookup over the in-memory rows. It maps
+// every variant column through the same conversion the repository uses, so a
+// test cannot pass with a record the production path would not build.
 func (m *MemDB) AssetRecord(ctx context.Context, assetID string) (storage.AssetRecord, error) {
 	row, err := m.GetAsset(ctx, assetID)
 	if err != nil {
 		return storage.AssetRecord{}, err
 	}
-	return storage.AssetRecord{AssetID: row.AssetID, StorageKey: row.StorageKey, MediaType: row.MediaType, SHA256: row.Sha256,
-		RawStorageKey: row.RawStorageKey.String, RawSHA256: row.RawSha256.String}, nil
+	return store.AssetRecordFromRow(row), nil
 }

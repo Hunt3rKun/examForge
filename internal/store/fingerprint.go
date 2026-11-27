@@ -11,10 +11,20 @@ import (
 	"examforge/internal/ir"
 )
 
-// FingerprintVersion is the canonicalization algorithm version. Changing the
-// canonical value or its encoding requires a new version and a backfill; the
-// hash meaning of an existing version never changes silently.
-const FingerprintVersion = 1
+// FingerprintVersion is the canonicalization algorithm written for new and
+// edited entities. Version 2 removes answer_space_mm, which is an occurrence
+// value owned by exam_items since migration 0006.
+//
+// Version 1 rows are never rewritten: the version column isolates the two
+// canonicalizations, and candidate lookups always match on both fingerprint
+// and version. Merging v1 and v2 hashes would claim two different
+// canonicalizations mean the same thing.
+const FingerprintVersion = 2
+
+// LegacyFingerprintVersion is the version of every row written before
+// migration 0006. Those rows stay readable as shared entities; only an
+// explicit offline backfill may re-canonicalize them.
+const LegacyFingerprintVersion = 1
 
 // fingerprintExcludedMetadata lists metadata keys that are classification or
 // dedup hints rather than question semantics. The list is fixed: knowledge
@@ -29,23 +39,25 @@ var fingerprintExcludedMetadata = map[string]bool{
 var errFingerprint = errors.New("store: question cannot be fingerprinted")
 
 // canonicalQuestion is the fingerprint input: question semantics only. It
-// leaves out question_id (entity IDs at any depth), display_number and score
-// (per-exam occurrence values) and provenance (source/review context).
+// leaves out question_id (entity IDs at any depth), display_number, score and
+// answer_space_mm (per-exam occurrence values) and provenance (source/review
+// context).
 type canonicalQuestion struct {
-	Kind          string              `json:"kind"`
-	QuestionType  string              `json:"question_type,omitempty"`
-	AnswerSpaceMM float64             `json:"answer_space_mm,omitempty"`
-	Stem          []ir.ContentBlock   `json:"stem"`
-	Options       []ir.Option         `json:"options,omitempty"`
-	Answer        *ir.Answer          `json:"answer,omitempty"`
-	Analysis      []ir.ContentBlock   `json:"analysis,omitempty"`
-	Children      []canonicalQuestion `json:"children,omitempty"`
-	Metadata      map[string]any      `json:"metadata,omitempty"`
+	Kind         string              `json:"kind"`
+	QuestionType string              `json:"question_type,omitempty"`
+	Stem         []ir.ContentBlock   `json:"stem"`
+	Options      []ir.Option         `json:"options,omitempty"`
+	Answer       *ir.Answer          `json:"answer,omitempty"`
+	Analysis     []ir.ContentBlock   `json:"analysis,omitempty"`
+	Children     []canonicalQuestion `json:"children,omitempty"`
+	Metadata     map[string]any      `json:"metadata,omitempty"`
 }
 
 // QuestionFingerprint returns the deterministic SHA-256 of a question's
-// semantic content. Equal fingerprints mean equal semantics; they do not mean
-// one entity, because display number, score and provenance may differ.
+// semantic content under the current canonicalization version. Equal
+// fingerprints mean equal semantics within one version; they do not mean one
+// entity, because display number, score, answer space and provenance may
+// differ.
 func QuestionFingerprint(q ir.QuestionItem) (string, error) {
 	canonical, err := canonicalize(q)
 	if err != nil {
@@ -57,19 +69,18 @@ func QuestionFingerprint(q ir.QuestionItem) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("%w: %v", errFingerprint, err)
 	}
-	sum := sha256.Sum256(append([]byte("examforge/question/v1\x00"), encoded...))
+	sum := sha256.Sum256(append([]byte("examforge/question/v2\x00"), encoded...))
 	return hex.EncodeToString(sum[:]), nil
 }
 
 func canonicalize(q ir.QuestionItem) (canonicalQuestion, error) {
 	out := canonicalQuestion{
-		Kind:          q.Kind,
-		QuestionType:  q.QuestionType,
-		AnswerSpaceMM: normalizeFloat(q.AnswerSpaceMM),
-		Stem:          blocksOrNil(q.Stem),
-		Options:       q.Options,
-		Answer:        q.Answer,
-		Analysis:      blocksOrNil(q.Analysis),
+		Kind:         q.Kind,
+		QuestionType: q.QuestionType,
+		Stem:         blocksOrNil(q.Stem),
+		Options:      q.Options,
+		Answer:       q.Answer,
+		Analysis:     blocksOrNil(q.Analysis),
 	}
 	if len(q.Metadata) > 0 {
 		out.Metadata = make(map[string]any, len(q.Metadata))
@@ -119,14 +130,6 @@ func checkJSONValue(path string, value any) error {
 		}
 	}
 	return nil
-}
-
-// normalizeFloat gives -0 and 0 one encoding.
-func normalizeFloat(f float64) float64 {
-	if f == 0 {
-		return 0
-	}
-	return f
 }
 
 // blocksOrNil gives an absent and an empty block list one encoding.

@@ -1,0 +1,413 @@
+openapi: 3.1.0
+info:
+  title: ExamForge API
+  version: 1.0.0
+  description: HTTP contract for the ExamForge slice 4A API.
+servers:
+  - url: /
+paths:
+  /api/v1/ingest:
+    post:
+      operationId: submitIngest
+      summary: Submit a PDF for ingestion
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [file]
+              additionalProperties: false
+              properties:
+                file:
+                  type: string
+                  format: binary
+      responses:
+        '202':
+          description: Ingestion accepted
+          headers:
+            Location: { $ref: '#/components/headers/Location' }
+            X-Request-Id: { $ref: '#/components/headers/RequestId' }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/IngestAccepted' }
+        default: { $ref: '#/components/responses/DefaultError' }
+  /api/v1/jobs:
+    get:
+      operationId: listJobs
+      parameters:
+        - { name: limit, in: query, schema: { type: integer, minimum: 1, maximum: 100 } }
+        - { name: cursor, in: query, schema: { type: string } }
+        - { name: state, in: query, schema: { $ref: '#/components/schemas/JobState' } }
+      responses:
+        '200':
+          description: Jobs ordered by created_at and job_id descending
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/JobPage' }
+        default: { $ref: '#/components/responses/DefaultError' }
+  /api/v1/jobs/{job_id}:
+    parameters:
+      - { $ref: '#/components/parameters/JobId' }
+    get:
+      operationId: getJob
+      responses:
+        '200':
+          description: Ingestion job
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Job' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        default: { $ref: '#/components/responses/DefaultError' }
+  /api/v1/exams:
+    get:
+      operationId: listExams
+      parameters:
+        - { name: limit, in: query, schema: { type: integer, minimum: 1, maximum: 100 } }
+        - { name: cursor, in: query, schema: { type: string } }
+      responses:
+        '200':
+          description: Exams ordered by created_at and exam_id descending
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ExamPage' }
+        default: { $ref: '#/components/responses/DefaultError' }
+  /api/v1/exams/{exam_id}:
+    parameters:
+      - { $ref: '#/components/parameters/ExamId' }
+    get:
+      operationId: getExam
+      responses:
+        '200':
+          description: Exam IR with occurrence and asset metadata
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ExamDetail' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        default: { $ref: '#/components/responses/DefaultError' }
+  /api/v1/exams/{exam_id}/source-pdf:
+    parameters:
+      - { $ref: '#/components/parameters/ExamId' }
+    get:
+      operationId: getSourcePdf
+      description: Returns the complete PDF with 200; Range is ignored and 206 is not supported.
+      responses:
+        '200':
+          description: Source PDF
+          headers:
+            Content-Type: { schema: { type: string, const: application/pdf } }
+            Content-Disposition: { schema: { type: string, const: inline } }
+            X-Content-Type-Options: { schema: { type: string, const: nosniff } }
+            ETag: { $ref: '#/components/headers/ETag' }
+          content:
+            application/pdf:
+              schema: { type: string, format: binary }
+        '404': { $ref: '#/components/responses/NotFound' }
+        default: { $ref: '#/components/responses/DefaultError' }
+  /api/v1/exams/{exam_id}/items/{item_id}:
+    parameters:
+      - { $ref: '#/components/parameters/ExamId' }
+      - { $ref: '#/components/parameters/ItemId' }
+    patch:
+      operationId: patchExamItem
+      description: >-
+        Requires a strong If-Match ETag. Null explicitly clears only nullable scalar/text fields
+        (stem, answer, analysis, metadata, display_number, score, answer_space_mm).
+        Omitted fields are unchanged. Null is not a deletion operation for required fields;
+        options, provenance, and review_status must be non-null when supplied. Empty arrays or
+        objects are not equivalent to null. Question kind, hierarchy, ordering and asset identity
+        cannot be changed by this operation.
+      parameters:
+        - { $ref: '#/components/parameters/IfMatch' }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/PatchExamItem' }
+      responses:
+        '200':
+          description: Updated item
+          headers:
+            ETag: { $ref: '#/components/headers/ETag' }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/PatchedItem' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409':
+          description: Revision conflict; response includes the current ETag
+          headers:
+            ETag: { $ref: '#/components/headers/ETag' }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '413': { $ref: '#/components/responses/TooLarge' }
+        '422': { $ref: '#/components/responses/ValidationError' }
+        default: { $ref: '#/components/responses/DefaultError' }
+  /api/v1/assets/{asset_id}:
+    parameters:
+      - { $ref: '#/components/parameters/AssetId' }
+    get:
+      operationId: getAssetVariant
+      parameters:
+        - name: variant
+          in: query
+          description: active selects the current registered selector; omitted means active.
+          schema: { type: string, enum: [active, clean, raw], default: active }
+      responses:
+        '200':
+          description: Validated image asset
+          headers:
+            ETag: { $ref: '#/components/headers/ETag' }
+            X-Content-Type-Options: { schema: { type: string, const: nosniff } }
+            Content-Security-Policy: { schema: { type: string, const: "default-src 'none'; sandbox" } }
+            Cache-Control: { schema: { type: string } }
+          content:
+            image/png: { schema: { type: string, format: binary } }
+            image/jpeg: { schema: { type: string, format: binary } }
+            image/gif: { schema: { type: string, format: binary } }
+            image/webp: { schema: { type: string, format: binary } }
+            image/svg+xml: { schema: { type: string, format: binary } }
+        '404': { $ref: '#/components/responses/VariantNotFound' }
+        default: { $ref: '#/components/responses/DefaultError' }
+  /api/v1/assets/{asset_id}/active-variant:
+    parameters:
+      - { $ref: '#/components/parameters/AssetId' }
+    patch:
+      operationId: setActiveAssetVariant
+      parameters:
+        - { $ref: '#/components/parameters/IfMatch' }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [variant]
+              properties:
+                variant: { type: string, enum: [raw, clean] }
+      responses:
+        '200':
+          description: Active variant changed
+          headers:
+            ETag: { $ref: '#/components/headers/ETag' }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AssetState' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '404': { $ref: '#/components/responses/VariantNotFound' }
+        '409':
+          description: Revision conflict; response includes the current ETag
+          headers:
+            ETag: { $ref: '#/components/headers/ETag' }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        default: { $ref: '#/components/responses/DefaultError' }
+  /api/v1/exams/{exam_id}/render:
+    parameters:
+      - { $ref: '#/components/parameters/ExamId' }
+    post:
+      operationId: renderExam
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '../schemas/layout-spec-v1.json' }
+      responses:
+        '200':
+          description: Rendered PDF
+          headers:
+            ETag: { $ref: '#/components/headers/ETag' }
+            X-Content-Type-Options: { schema: { type: string, const: nosniff } }
+            X-Render-Warning-Count:
+              schema: { type: integer, minimum: 0 }
+              description: Exact warning count, including warnings omitted from summary.
+            X-Render-Warnings:
+              schema:
+                type: string
+                description: Optional bounded JSON array of ASCII-only objects with code and path; omitted entirely if over 4 KiB or unsafe.
+          content:
+            application/pdf:
+              schema: { type: string, format: binary }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '413': { $ref: '#/components/responses/TooLarge' }
+        '422': { $ref: '#/components/responses/ValidationError' }
+        '503': { $ref: '#/components/responses/Unavailable' }
+        default: { $ref: '#/components/responses/DefaultError' }
+components:
+  parameters:
+    JobId: { name: job_id, in: path, required: true, schema: { type: string, format: uuid } }
+    ExamId: { name: exam_id, in: path, required: true, schema: { type: string, format: uuid } }
+    ItemId: { name: item_id, in: path, required: true, schema: { type: string, format: uuid } }
+    AssetId: { name: asset_id, in: path, required: true, schema: { type: string, pattern: '^ast_[A-Za-z0-9_-]+$' } }
+    IfMatch:
+      name: If-Match
+      in: header
+      required: true
+      description: Strong ETag copied verbatim from the resource representation.
+      schema: { type: string, minLength: 1 }
+  headers:
+    ETag: { description: Strong resource or artifact validator., schema: { type: string } }
+    Location: { description: URL of the created job., schema: { type: string, format: uri-reference } }
+    RequestId: { description: Request correlation identifier., schema: { type: string } }
+  responses:
+    BadRequest: { description: Malformed request., content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } } }
+    NotFound: { description: Resource not found., content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } } }
+    VariantNotFound: { description: Resource or requested variant not found., content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } } }
+    TooLarge: { description: Request exceeds a configured body limit., content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } } }
+    ValidationError: { description: Semantically invalid request., content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } } }
+    Unavailable: { description: Dependency unavailable or service not ready., content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } } }
+    DefaultError:
+      description: Error response. All JSON errors include request_id.
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+  schemas:
+    ExamDocumentIR: { $ref: '../schemas/exam-ir-v1.json' }
+    LayoutSpec: { $ref: '../schemas/layout-spec-v1.json' }
+    Error:
+      type: object
+      additionalProperties: false
+      required: [code, message, request_id]
+      properties:
+        code: { type: string, description: Stable machine-readable error code. }
+        message: { type: string, description: Safe caller-facing message without internal details. }
+        request_id: { type: string }
+        details:
+          type: array
+          items:
+            type: object
+            additionalProperties: false
+            required: [path, code, message]
+            properties:
+              path: { type: string }
+              code: { type: string }
+              message: { type: string }
+    JobState: { type: string, enum: [queued, parsing, validating, persisted, failed] }
+    Job:
+      type: object
+      required: [job_id, state, attempt_count, created_at, updated_at]
+      properties:
+        job_id: { type: string, format: uuid }
+        state: { $ref: '#/components/schemas/JobState' }
+        attempt_count: { type: integer, minimum: 0 }
+        exam_id: { type: [string, 'null'], format: uuid }
+        error_code: { type: [string, 'null'] }
+        error_summary: { type: [string, 'null'] }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+        started_at: { type: [string, 'null'], format: date-time }
+        finished_at: { type: [string, 'null'], format: date-time }
+    IngestAccepted:
+      type: object
+      required: [job_id, state, created_at, updated_at]
+      properties:
+        job_id: { type: string, format: uuid }
+        state: { type: string, const: queued }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+    JobPage:
+      type: object
+      required: [items, next_cursor]
+      properties:
+        items: { type: array, items: { $ref: '#/components/schemas/Job' } }
+        next_cursor: { type: [string, 'null'] }
+    ExamSummary:
+      type: object
+      required: [exam_id, created_at, pending_review_count]
+      properties:
+        exam_id: { type: string, format: uuid }
+        title: { type: string }
+        subject: { type: string }
+        created_at: { type: string, format: date-time }
+        pending_review_count: { type: integer, minimum: 0 }
+        section_count: { type: integer, minimum: 0 }
+        item_count: { type: integer, minimum: 0 }
+    ExamPage:
+      type: object
+      required: [items, next_cursor]
+      properties:
+        items: { type: array, items: { $ref: '#/components/schemas/ExamSummary' } }
+        next_cursor: { type: [string, 'null'] }
+    ExamDetail:
+      type: object
+      required: [ir, metadata, items, assets]
+      properties:
+        ir: { $ref: '#/components/schemas/ExamDocumentIR' }
+        metadata:
+          type: object
+          required: [exam_id, created_at, updated_at]
+          properties:
+            exam_id: { type: string, format: uuid }
+            created_at: { type: string, format: date-time }
+            updated_at: { type: string, format: date-time }
+            source_sha256: { type: [string, 'null'], pattern: '^[a-fA-F0-9]{64}$' }
+        items: { type: array, items: { $ref: '#/components/schemas/ItemOccurrence' } }
+        assets: { type: array, items: { $ref: '#/components/schemas/AssetState' } }
+    ItemOccurrence:
+      type: object
+      required: [section_id, ordinal, item_id, question_id, revision, etag, is_shared]
+      properties:
+        section_id: { type: string }
+        ordinal: { type: integer, minimum: 0 }
+        item_id: { type: string, format: uuid }
+        question_id: { type: string, format: uuid }
+        revision: { type: integer, minimum: 1 }
+        etag: { type: string }
+        is_shared: { type: boolean }
+    AssetState:
+      type: object
+      required: [asset_id, active_variant, available_variants, revision, etag]
+      properties:
+        asset_id: { type: string, pattern: '^ast_[A-Za-z0-9_-]+$' }
+        active_variant: { type: string, enum: [raw, clean] }
+        available_variants: { type: array, uniqueItems: true, items: { type: string, enum: [raw, clean] } }
+        revision: { type: integer, minimum: 1 }
+        etag: { type: string }
+    PatchExamItem:
+      type: object
+      minProperties: 1
+      additionalProperties: false
+      properties:
+        stem:
+          description: Required structured field; null is rejected. Omitted means unchanged.
+          $ref: '../schemas/exam-ir-v1.json#/$defs/blocks'
+        options:
+          description: Omitted means unchanged; null is rejected. Empty array explicitly clears options.
+          $ref: '../schemas/exam-ir-v1.json#/$defs/question/properties/options'
+        answer:
+          description: Null clears the answer; omitted means unchanged.
+          oneOf:
+            - { $ref: '../schemas/exam-ir-v1.json#/$defs/answer' }
+            - { type: 'null' }
+        analysis:
+          description: Null clears analysis; omitted means unchanged.
+          oneOf:
+            - { $ref: '../schemas/exam-ir-v1.json#/$defs/blocks' }
+            - { type: 'null' }
+        metadata:
+          description: Null clears optional metadata; omitted means unchanged.
+          oneOf:
+            - { $ref: '../schemas/exam-ir-v1.json#/$defs/question/properties/metadata' }
+            - { type: 'null' }
+        provenance:
+          type: object
+          additionalProperties: false
+          properties:
+            review_status:
+              type: string
+              enum: [pending, approved, rejected]
+              description: Must not be null; omission leaves review status unchanged.
+        display_number: { type: [string, 'null'], maxLength: 128, description: Null clears the optional display number; omission leaves it unchanged. }
+        score: { type: [number, 'null'], minimum: 0, description: Null clears the optional score; omission leaves it unchanged. }
+        answer_space_mm: { type: [number, 'null'], minimum: 0, description: Null clears the occurrence override; omission leaves it unchanged. }
+    PatchedItem:
+      type: object
+      required: [item_id, revision, etag]
+      properties:
+        item_id: { type: string, format: uuid }
+        revision: { type: integer, minimum: 1 }
+        etag: { type: string }
+        question_id: { type: string, format: uuid }

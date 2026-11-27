@@ -1,19 +1,28 @@
 # Pipeline and queue — current-state contract
 
-## Implemented (MVP slices 2 + 3)
+## Implemented (MVP slices 2 + 3; slice 4A API/server)
 
 The ingest pipeline is PostgreSQL + River + S3-protocol object storage, fully
 offline-testable through in-memory fakes. Slice 3 adds the cloud vision parser
 behind the same `ParserAdapter` seam and dual-object (raw + clean) asset
-persistence. There is no HTTP API, frontend, or DOCX output in this slice.
+persistence. Slice 4A adds the store occurrence/variant primitives, a bounded
+`net/http` API, OpenAPI contract, and resident `cmd/examserver` (details below).
+The API remains an internal trusted-network service; it is not intended for
+public exposure. No frontend or DOCX output is implemented.
 
 ### Layout
 
-- `migrations/0001_assets.sql` … `0005_asset_raw_digest.sql`: application
-  schema. `0005` adds nullable `assets.raw_sha256` (pre-migration rows keep
-  NULL; no digest is fabricated) and the `assets_raw_digest_needs_key` CHECK
-  (a digest requires a companion key; the converse is intentionally not
-  constrained so legacy rows survive). River
+- `migrations/0001_assets.sql` … `0007_asset_variants.sql`: application
+  schema. `0005` adds nullable `assets.raw_sha256` and the
+  `assets_raw_digest_needs_key` CHECK. `0006_exam_item_occurrence.sql` adds
+  nullable `exam_items.answer_space_mm_override` and positive `revision` (default
+  1), backfilling positive legacy answer-space values from referenced question
+  JSON; absent/zero values remain NULL and assemble as zero. `0007_asset_variants.sql`
+  adds `clean_storage_key`, `clean_sha256`, `active_variant` (defaulted by
+  status: `raw_cropped` → raw, otherwise clean), and positive asset `revision`.
+  It backfills clean columns from the previous main object for cleaned assets and
+  raw columns from the main object for raw-cropped assets; legacy raw keys without
+  digest remain unverified. Existing `storage_key`/`sha256` are retained. River
   tables are never created here; `rivermigrate` owns them. `migrations.go`
   embeds `migrations/*.sql` as `examforge.Migrations` for the runner and the
   CLI.
@@ -37,8 +46,11 @@ persistence. There is no HTTP API, frontend, or DOCX output in this slice.
   `23505`/`23503` → `ErrConflict`, `23502`/`23514`/`22001`/`22003`/`22P02` →
   `ErrInvalid`, everything else left for transient classification),
   `Assembler` (`Persist`/`PersistTx`/`Assemble`), `Persister`, canonical
-  `QuestionFingerprint` (`FingerprintVersion = 1`), `SourceRecord`,
-  `VerifiedAsset`, `ExamRecord`, `AssetURIScheme = "examforge-asset://"`.
+  `QuestionFingerprint` (`FingerprintVersion = 2`; `LegacyFingerprintVersion = 1`),
+  `SourceRecord`, `VerifiedAsset`, `ExamRecord`,
+  `AssetURIScheme = "examforge-asset://"`. Fingerprint v2 excludes the
+  occurrence-owned `answer_space_mm`; v1 rows remain version-isolated and are
+  not rewritten.
 - `internal/store/storetest/`: `MemDB`, an in-memory `Workspace`/`IngestJobs`
   with snapshot rollback and fault injection, plus an in-memory `Persister`.
   It mirrors schema keys; real SQL is exercised only by integration tests.
@@ -71,17 +83,45 @@ persistence. There is no HTTP API, frontend, or DOCX output in this slice.
   rounds, warnings). The API key is never a flag and never printed. Never
   part of the offline gate.
 
+### Slice 4A API and server
+
+- `api/openapi.yaml` is the OpenAPI 3.1 transport contract; `cmd/openapicheck`
+  checks its structure and local references offline. This is a structural
+  reference checker, not a full OpenAPI validator or client generator.
+- `internal/api/` implements the method/path routes for health/readiness, PDF
+  ingest, paginated job/exam catalogs and detail, source-PDF proxy, occurrence
+  item PATCH, asset variant proxy/selector PATCH, and immediate PDF rendering.
+  DTOs keep item revisions and asset selector state outside Exam IR v1. The
+  package owns request IDs, generic error envelopes, CORS allowlist, body caps,
+  route deadlines/semaphores, bounded warnings, strong ETags, and access logs
+  that use route templates rather than resource IDs.
+- `internal/api/domain.go` adapts `Repository`/`Assembler` operations to the
+  `Domain` seam. `internal/store/catalog.go` supplies catalog projections and
+  consistent exam snapshots; `internal/store/edit.go` supplies occurrence
+  edits with copy-on-write, revision checks, and active-variant updates.
+- `cmd/examserver/` validates environment-only configuration, uses the
+  explicit S3 client and pgx pool, refuses pending application/River migrations,
+  configures producer always and worker optionally, composes parser/renderer/API,
+  and performs readiness-first graceful shutdown with a shared deadline.
+  It does not auto-migrate or source `.env` files.
+- `migrations/0006_exam_item_occurrence.sql` and
+  `migrations/0007_asset_variants.sql` establish the occurrence and asset
+  revision/variant data model. `internal/storage/resolver.go` selects active,
+  raw, or clean key+digest, rejects unavailable/unverified variants, verifies
+  bytes, and creates an isolated resolver snapshot/cache for each render.
+
 ### Schema
 
 `assets` (`asset_id` PK, `storage_key` unique, `sha256`, nullable
-`raw_sha256` with the `assets_raw_digest_needs_key` CHECK, status/geometry
-checks), `questions` (`question_id` UUID PK, `content_json` complete
-`QuestionItem`, `content_fingerprint` + `fingerprint_version`, non-unique
-fingerprint index), `ingest_jobs` (`state` CHECK, `river_job_id` unique,
-`source_file_sha256` non-unique), `exams` (one per `ingest_job_id`, unique),
-`exam_sections` (unique `(exam_id, ordinal)` and `(exam_id, ir_section_id)`),
-`exam_items` (unique `(section_id, ordinal)`, FK to `questions`), with
-`ingest_jobs.exam_id` FK added in `0004`.
+`raw_sha256` with the `assets_raw_digest_needs_key` CHECK, clean key/digest,
+`active_variant`, positive `revision`, status/geometry checks), `questions`
+(`question_id` UUID PK, `content_json` complete entity `QuestionItem`,
+`content_fingerprint` + `fingerprint_version`, non-unique fingerprint index),
+`ingest_jobs` (`state` CHECK, `river_job_id` unique, `source_file_sha256`
+non-unique), `exams` (one per `ingest_job_id`, unique), `exam_sections` (unique
+`(exam_id, ordinal)` and `(exam_id, ir_section_id)`), `exam_items` (unique
+`(section_id, ordinal)`, FK to `questions`, occurrence `answer_space_mm_override`
+and positive `revision`), with `ingest_jobs.exam_id` FK added in `0004`.
 
 Asset rows are written with `INSERT ... ON CONFLICT (asset_id) DO NOTHING
 RETURNING *` (`internal/store/queries/assets.sql`). Two concurrent ingests of
@@ -96,10 +136,12 @@ Dual-digest rules (slice 3): a new `cleaned` record must carry both a raw
 companion key and a valid raw digest; a `raw_cropped` record must carry
 neither. When an existing row and the incoming record both declare a raw
 digest, a difference is `ErrConflict`. A legacy row (`raw_sha256 IS NULL`)
-keeps its stored shape — no digest is fabricated — and only its main object
-stays authoritative; `S3AssetResolver.ResolveRaw` refuses a companion without
-its own registered digest and never verifies raw bytes against the clean
-digest.
+keeps its stored shape — no digest is fabricated — and its main object remains
+authoritative for the clean variant when applicable; `S3AssetResolver` refuses
+a raw companion without its own registered digest and never verifies raw bytes
+against the clean digest. Since migration `0007`, selection and availability are
+explicit in the variant columns; the legacy main key/digest are retained for
+compatibility.
 
 ### Ingest state machine
 
@@ -179,10 +221,11 @@ error messages.
 
 ## Boundaries
 
-The `Submitter`, worker, parser, and object store sit behind interfaces so the
-offline gate never needs PostgreSQL, S3, or network access. The cloud parser
-is one such seam implementation; future HTTP handlers replace the CLI, not
-the state machine. Queue families beyond ingestion (asset processing,
-rendering) are not implemented. River retries re-run the whole parse: there
-is no cross-attempt page-result cache, so a retried job may bill provider
-tokens again.
+The `Submitter`, worker, parser, object store, API domain, and renderer sit
+behind interfaces so the default offline gate never needs PostgreSQL, S3, or
+network access. The cloud parser is one such seam implementation. Queue families
+beyond ingestion (asset processing, rendering) are not implemented. River
+retries re-run the whole parse: there is no cross-attempt page-result cache, so
+a retried job may bill provider tokens again. The slice-4A contract and known
+limitations remain documented in `docs/specs/slice-4a-http-api.md` and must be
+kept aligned with `api/openapi.yaml` and the source routes.

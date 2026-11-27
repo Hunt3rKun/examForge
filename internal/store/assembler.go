@@ -131,7 +131,8 @@ func (a *Assembler) Persist(ctx context.Context, ws Workspace, exam ir.ExamDocum
 		return ExamRecord{}, err
 	}
 
-	entities := map[string]resolvedQuestion{}
+	entities := map[pgtype.UUID]bool{}
+	reused := map[string]resolvedQuestion{}
 	metadataJSON, err := json.Marshal(exam.Metadata)
 	if err != nil {
 		return ExamRecord{}, fmt.Errorf("%w: metadata: %v", ErrInvalid, err)
@@ -141,13 +142,23 @@ func (a *Assembler) Persist(ctx context.Context, ws Workspace, exam ir.ExamDocum
 	for si, section := range exam.Sections {
 		plan[si] = make([]resolvedQuestion, len(section.Questions))
 		for qi, question := range section.Questions {
-			entity, err := a.resolveQuestion(ctx, ws, exam, question, entities)
+			entity, err := a.resolveQuestion(ctx, ws, exam, question, reused)
 			if err != nil {
 				return ExamRecord{}, fmt.Errorf("sections[%d].questions[%d]: %w", si, qi, err)
 			}
 			plan[si][qi] = entity
+			entities[entity.id] = true
 			itemCount++
 		}
+	}
+
+	// Every path that adds an exam_items reference takes the question row
+	// locks first, in sorted ID order, so a concurrent edit's reference count
+	// cannot miss this attach and two writers cannot deadlock. Rows this
+	// transaction just inserted are already locked; locking them again is a
+	// no-op.
+	if err := lockQuestionSet(ctx, ws, entities); err != nil {
+		return ExamRecord{}, err
 	}
 
 	examParams := sqlcgen.UpdateExamParams{
@@ -198,6 +209,7 @@ func (a *Assembler) Persist(ctx context.Context, ws Workspace, exam ir.ExamDocum
 				Ordinal:               int32(qi),
 				DisplayNumberOverride: occurrenceText(entity.content.DisplayNumber, incoming.DisplayNumber),
 				ScoreOverride:         occurrenceFloat(entity.content.Score, incoming.Score),
+				AnswerSpaceMmOverride: occurrenceFloat(0, incoming.AnswerSpaceMM),
 			}); err != nil {
 				return ExamRecord{}, fmt.Errorf("insert item %d of section %q: %w", qi, section.SectionID, err)
 			}
@@ -256,11 +268,30 @@ func (a *Assembler) persistAssets(ctx context.Context, ws Workspace, exam ir.Exa
 			return fmt.Errorf("%w: asset %q: %v", ErrInvalid, id, err)
 		}
 		wantStorage := rawKey
+		// Every new row names both variants explicitly: the selector and the
+		// per-variant key/digest columns are never left to the column default,
+		// because a raw-only asset and a cleaned asset differ in which variant
+		// is active and which columns are populated.
+		incoming := sqlcgen.InsertAssetParams{
+			AssetID:          id,
+			MediaType:        asset.MediaType,
+			StorageKey:       upload.StorageKey,
+			Status:           asset.Status,
+			AspectRatio:      positiveOrNil(asset.AspectRatio),
+			SuggestedWidthMm: positiveOrNil(asset.SuggestedWidthMM),
+			Caption:          textOrNil(asset.Caption),
+			Alt:              textOrNil(asset.Alt),
+			Sha256:           upload.SHA256,
+		}
 		if asset.Status == "raw_cropped" {
 			// A raw-only asset stores one object: no companion, no second digest.
 			if upload.RawStorageKey != "" || upload.RawSHA256 != "" {
 				return fmt.Errorf("%w: asset %q is raw_cropped but carries a raw companion record", ErrInvalid, id)
 			}
+			// The main object is the raw variant; there is no clean variant.
+			incoming.RawStorageKey = textOrNil(upload.StorageKey)
+			incoming.RawSha256 = textOrNil(upload.SHA256)
+			incoming.ActiveVariant = string(storage.VariantRaw)
 		} else {
 			if wantStorage, err = storage.CleanAssetKey(id, asset.MediaType); err != nil {
 				return fmt.Errorf("%w: asset %q: %v", ErrInvalid, id, err)
@@ -268,6 +299,12 @@ func (a *Assembler) persistAssets(ctx context.Context, ws Workspace, exam ir.Exa
 			if upload.RawStorageKey != rawKey || !storage.ValidSHA256(upload.RawSHA256) {
 				return fmt.Errorf("%w: asset %q needs a raw companion key and a valid raw digest", ErrInvalid, id)
 			}
+			// The main object is the clean variant; the companion is raw.
+			incoming.CleanStorageKey = textOrNil(upload.StorageKey)
+			incoming.CleanSha256 = textOrNil(upload.SHA256)
+			incoming.RawStorageKey = textOrNil(upload.RawStorageKey)
+			incoming.RawSha256 = textOrNil(upload.RawSHA256)
+			incoming.ActiveVariant = string(storage.VariantClean)
 		}
 		if upload.StorageKey != wantStorage {
 			return fmt.Errorf("%w: asset %q keys do not follow the deterministic key rule", ErrInvalid, id)
@@ -276,20 +313,7 @@ func (a *Assembler) persistAssets(ctx context.Context, ws Workspace, exam ir.Exa
 		if err != nil {
 			return fmt.Errorf("%w: asset %q source_bbox: %v", ErrInvalid, id, err)
 		}
-		incoming := sqlcgen.InsertAssetParams{
-			AssetID:          id,
-			MediaType:        asset.MediaType,
-			StorageKey:       upload.StorageKey,
-			RawStorageKey:    textOrNil(upload.RawStorageKey),
-			Status:           asset.Status,
-			AspectRatio:      positiveOrNil(asset.AspectRatio),
-			SuggestedWidthMm: positiveOrNil(asset.SuggestedWidthMM),
-			Caption:          textOrNil(asset.Caption),
-			Alt:              textOrNil(asset.Alt),
-			SourceBbox:       bbox,
-			Sha256:           upload.SHA256,
-			RawSha256:        textOrNil(upload.RawSHA256),
-		}
+		incoming.SourceBbox = bbox
 		row, err := ws.GetAsset(ctx, id)
 		created := false
 		switch {
@@ -345,18 +369,39 @@ func (a *Assembler) persistAssets(ctx context.Context, ws Workspace, exam ir.Exa
 }
 
 // sameAssetIdentity reports whether an existing row describes the same asset
-// as the incoming record: the identity fields, not the display text.
+// as the incoming record: the identity fields, not the display text, and not
+// the mutable selector (active_variant) or revision.
 func sameAssetIdentity(row sqlcgen.Asset, incoming sqlcgen.InsertAssetParams) bool {
 	return row.MediaType == incoming.MediaType && row.Status == incoming.Status &&
 		row.StorageKey == incoming.StorageKey && sameText(row.RawStorageKey, incoming.RawStorageKey) &&
+		cleanKey(row) == textValue(incoming.CleanStorageKey) &&
 		sameFloat(row.AspectRatio, incoming.AspectRatio) &&
 		sameFloat(row.SuggestedWidthMm, incoming.SuggestedWidthMm) &&
 		sameJSON(row.SourceBbox, incoming.SourceBbox)
 }
 
+// cleanKey returns the row's clean object key, applying the pre-migration
+// fallback: a cleaned row written before migration 0007 has no clean column,
+// and its main key is the clean object. A raw_cropped row has no clean object.
+func cleanKey(row sqlcgen.Asset) string {
+	if row.CleanStorageKey.Valid && row.CleanStorageKey.String != "" {
+		return row.CleanStorageKey.String
+	}
+	if row.Status == "cleaned" {
+		return row.StorageKey
+	}
+	return ""
+}
+
 // resolveQuestion returns the entity for one occurrence, creating it when no
 // equal-content candidate exists. The cache holds entities selected or created
 // in this transaction, so repeated content inside one exam shares an entity.
+//
+// The candidate lookup runs under the question row locks (FOR UPDATE): two
+// concurrent ingests of the same content must not both conclude no candidate
+// exists and write two equal entities for one occurrence set. The rows it
+// returns are already locked by this transaction, so the reference the caller
+// inserts is covered by the lock protocol.
 func (a *Assembler) resolveQuestion(ctx context.Context, ws Workspace, exam ir.ExamDocumentIR, q ir.QuestionItem, cache map[string]resolvedQuestion) (resolvedQuestion, error) {
 	fp, err := QuestionFingerprint(q)
 	if err != nil {
@@ -365,7 +410,7 @@ func (a *Assembler) resolveQuestion(ctx context.Context, ws Workspace, exam ir.E
 	if cached, ok := cache[fp]; ok && sameQuestionContent(cached.content, q) {
 		return cached, nil
 	}
-	candidates, err := ws.ListQuestionsByFingerprint(ctx, sqlcgen.ListQuestionsByFingerprintParams{
+	candidates, err := ws.ListQuestionsByFingerprintForUpdate(ctx, sqlcgen.ListQuestionsByFingerprintForUpdateParams{
 		ContentFingerprint: fp, FingerprintVersion: FingerprintVersion,
 	})
 	if err != nil {
@@ -383,7 +428,7 @@ func (a *Assembler) resolveQuestion(ctx context.Context, ws Workspace, exam ir.E
 			return r, nil
 		}
 	}
-	contentJSON, err := json.Marshal(q)
+	contentJSON, err := json.Marshal(entityContent(q))
 	if err != nil {
 		return resolvedQuestion{}, fmt.Errorf("%w: question content: %v", ErrInvalid, err)
 	}
@@ -410,11 +455,39 @@ func (a *Assembler) resolveQuestion(ctx context.Context, ws Workspace, exam ir.E
 	return r, nil
 }
 
+// lockQuestionSet takes the sorted question row locks for every entity one
+// write is about to reference. The sort happens in SQL (ORDER BY question_id),
+// which is the order every writer uses, so the protocol cannot deadlock.
+func lockQuestionSet(ctx context.Context, ws Workspace, ids map[pgtype.UUID]bool) error {
+	if len(ids) == 0 {
+		return nil
+	}
+	list := make([]pgtype.UUID, 0, len(ids))
+	for id := range ids {
+		list = append(list, id)
+	}
+	if _, err := ws.LockQuestions(ctx, list); err != nil {
+		return fmt.Errorf("lock questions: %w", err)
+	}
+	return nil
+}
+
+// entityContent is what a question entity stores: the question's semantics.
+// The top-level answer_space_mm is an occurrence value owned by exam_items
+// since fingerprint version 2, so it never enters content_json. A composite's
+// children keep theirs: they have no exam_items row of their own and the value
+// is part of the composite's layout.
+func entityContent(q ir.QuestionItem) ir.QuestionItem {
+	q.AnswerSpaceMM = 0
+	return q
+}
+
 // sameQuestionContent reports equality of everything except question_id,
-// display_number and score, which are per-occurrence values.
+// display_number, score and answer_space_mm, which are per-occurrence values
+// owned by exam_items since fingerprint version 2.
 func sameQuestionContent(a, b ir.QuestionItem) bool {
-	a.QuestionID, a.DisplayNumber, a.Score = "", "", 0
-	b.QuestionID, b.DisplayNumber, b.Score = "", "", 0
+	a.QuestionID, a.DisplayNumber, a.Score, a.AnswerSpaceMM = "", "", 0, 0
+	b.QuestionID, b.DisplayNumber, b.Score, b.AnswerSpaceMM = "", "", 0, 0
 	x, _ := json.Marshal(a)
 	y, _ := json.Marshal(b)
 	return bytes.Equal(x, y)
@@ -521,11 +594,18 @@ func (a *Assembler) Assemble(ctx context.Context, rd Reader, examID uuid.UUID) (
 		section := ir.Section{SectionID: sec.IrSectionID, Title: sec.Title, Instruction: sec.Instruction.String}
 		for _, item := range itemsBySection[si] {
 			content := questions[item.QuestionID]
+			// The occurrence values come from exam_items only. answer_space_mm
+			// is reset first: a legacy entity row still carries the value inside
+			// content_json, and that stored copy must never override the item.
+			content.AnswerSpaceMM = 0
 			if item.DisplayNumberOverride.Valid {
 				content.DisplayNumber = item.DisplayNumberOverride.String
 			}
 			if item.ScoreOverride.Valid {
 				content.Score = item.ScoreOverride.Float64
+			}
+			if item.AnswerSpaceMmOverride.Valid {
+				content.AnswerSpaceMM = item.AnswerSpaceMmOverride.Float64
 			}
 			section.Questions = append(section.Questions, content)
 		}
@@ -701,6 +781,13 @@ func occurrenceFloat(stored, incoming float64) pgtype.Float8 {
 }
 
 func textOrNil(s string) pgtype.Text { return pgtype.Text{String: s, Valid: s != ""} }
+
+func textValue(t pgtype.Text) string {
+	if !t.Valid {
+		return ""
+	}
+	return t.String
+}
 
 func positiveOrNil(f float64) pgtype.Float8 { return pgtype.Float8{Float64: f, Valid: f > 0} }
 

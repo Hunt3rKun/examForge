@@ -193,6 +193,12 @@ func TestLegacyRowWithoutRawDigestKeepsMainBehavior(t *testing.T) {
 		SourceBbox:       bbox,
 		Sha256:           legacy.SHA256,
 		// RawSha256 deliberately unset: the pre-migration shape.
+		//
+		// CleanStorageKey stays NULL too, modelling a row that predates the
+		// variant columns; the resolver must fall back to the main key for
+		// clean. active_variant is NOT NULL with a CHECK, so the selector is
+		// always written explicitly.
+		ActiveVariant: string(storage.VariantClean),
 	}); err != nil {
 		t.Fatal(err)
 	}

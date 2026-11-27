@@ -16,17 +16,30 @@ type Querier interface {
 	ClaimIngestJob(ctx context.Context, arg ClaimIngestJobParams) (IngestJob, error)
 	// Runs in the persistence transaction so the exam link commits with the exam.
 	CompleteIngestJob(ctx context.Context, arg CompleteIngestJobParams) (IngestJob, error)
+	// Reference count of one question entity. Callers hold the question row lock
+	// (FOR UPDATE) while counting, so a concurrent attach of the same question
+	// cannot slip between the count and the rewrite.
+	CountQuestionReferences(ctx context.Context, questionID pgtype.UUID) (int64, error)
 	// Clean up after an abandoned ingest job: only rows this job created.
 	DeleteAssets(ctx context.Context, assetIds []string) (int64, error)
 	DeleteIngestJob(ctx context.Context, jobID pgtype.UUID) (int64, error)
+	// Removes an entity the edit path orphaned. The NOT EXISTS guard makes the
+	// delete safe even if another item attached in the meantime.
+	DeleteQuestionIfUnreferenced(ctx context.Context, questionID pgtype.UUID) (int64, error)
 	// exam_items cascade from their section.
 	DeleteSections(ctx context.Context, examID pgtype.UUID) (int64, error)
 	FailIngestJob(ctx context.Context, arg FailIngestJobParams) (IngestJob, error)
 	GetAsset(ctx context.Context, assetID string) (Asset, error)
+	GetAssetForUpdate(ctx context.Context, assetID string) (Asset, error)
 	GetExam(ctx context.Context, examID pgtype.UUID) (Exam, error)
 	GetExamByJob(ctx context.Context, ingestJobID pgtype.UUID) (Exam, error)
+	GetExamForUpdate(ctx context.Context, examID pgtype.UUID) (Exam, error)
+	// Locks one occurrence for an edit. The row must belong to the exam on the
+	// path; the caller verifies that under the same lock.
+	GetExamItemForUpdate(ctx context.Context, itemID pgtype.UUID) (GetExamItemForUpdateRow, error)
 	GetIngestJob(ctx context.Context, jobID pgtype.UUID) (IngestJob, error)
 	GetQuestion(ctx context.Context, questionID pgtype.UUID) (Question, error)
+	GetQuestionForUpdate(ctx context.Context, questionID pgtype.UUID) (Question, error)
 	// Concurrent ingests of equal content may race here: both read no row, then
 	// both insert. A DO NOTHING conflict returns zero rows, and the caller
 	// re-reads and applies the same SHA-256 and metadata rules. That keeps "same
@@ -36,21 +49,55 @@ type Querier interface {
 	InsertExam(ctx context.Context, arg InsertExamParams) (Exam, error)
 	// Written in the same transaction as the River insert (river_job_id after).
 	InsertIngestJob(ctx context.Context, arg InsertIngestJobParams) (IngestJob, error)
+	// answer_space_mm is an occurrence value: it belongs to this item, never to
+	// the shared question entity.
 	InsertItem(ctx context.Context, arg InsertItemParams) error
 	InsertQuestion(ctx context.Context, arg InsertQuestionParams) (Question, error)
 	InsertSection(ctx context.Context, arg InsertSectionParams) (ExamSection, error)
 	ListAssets(ctx context.Context, assetIds []string) ([]Asset, error)
+	// Every occurrence of one exam in IR order (section ordinal, then item
+	// ordinal). Used by the API detail view and by the edit transaction.
+	ListExamItems(ctx context.Context, examID pgtype.UUID) ([]ExamItem, error)
+	ListExamsPage(ctx context.Context, arg ListExamsPageParams) ([]Exam, error)
+	// Stable keyset pagination over jobs: created_at DESC, job_id DESC, with an
+	// optional state filter. A NULL cursor is encoded as infinity.
+	ListIngestJobsPage(ctx context.Context, arg ListIngestJobsPageParams) ([]IngestJob, error)
 	ListItems(ctx context.Context, sectionID pgtype.UUID) ([]ExamItem, error)
+	// Stable keyset pagination: created_at DESC, exam_id DESC. A NULL cursor is
+	// encoded as infinity, so the first page starts at the newest exam.
+	// Reference counts for one exam's questions, so a detail view can say which
+	// items point at a shared entity.
+	ListQuestionReferenceCounts(ctx context.Context, questionIds []pgtype.UUID) ([]ListQuestionReferenceCountsRow, error)
 	ListQuestions(ctx context.Context, questionIds []pgtype.UUID) ([]Question, error)
 	// Candidates only. Several entities may share a fingerprint.
 	ListQuestionsByFingerprint(ctx context.Context, arg ListQuestionsByFingerprintParams) ([]Question, error)
+	// The same candidate lookup under a row lock, in question_id order. Every
+	// path that adds an exam_items reference takes this lock first, and the edit
+	// path takes it before counting references, so the count cannot miss a
+	// concurrent attach. The fixed order prevents deadlocks between two writers.
+	ListQuestionsByFingerprintForUpdate(ctx context.Context, arg ListQuestionsByFingerprintForUpdateParams) ([]Question, error)
 	ListSections(ctx context.Context, examID pgtype.UUID) ([]ExamSection, error)
+	// Row locks for the reference protocol. Every path that adds or moves an
+	// exam_items reference takes these locks in sorted question_id order before
+	// touching the reference, so a reference count and a relink can never
+	// interleave. New rows inserted by the same transaction are already locked.
+	LockQuestions(ctx context.Context, questionIds []pgtype.UUID) ([]pgtype.UUID, error)
 	// Every later transition is a compare-and-set on the current state.
 	MoveIngestJob(ctx context.Context, arg MoveIngestJobParams) (IngestJob, error)
+	// The selector switch is a compare-and-set on revision, so a stale If-Match
+	// never silently wins. It only rewrites the selector and revision: both
+	// variants keep their key and digest.
+	SetAssetActiveVariant(ctx context.Context, arg SetAssetActiveVariantParams) (Asset, error)
 	SetRiverJobID(ctx context.Context, arg SetRiverJobIDParams) (int64, error)
 	UpdateAssetDisplay(ctx context.Context, arg UpdateAssetDisplayParams) (int64, error)
 	// Replaying a job refreshes its existing exam instead of adding another.
 	UpdateExam(ctx context.Context, arg UpdateExamParams) (Exam, error)
+	// One edit statement: entity relink (when the shared entity was cloned) and
+	// occurrence values change together, and the revision compare-and-set makes a
+	// stale If-Match fail instead of silently winning.
+	UpdateItem(ctx context.Context, arg UpdateItemParams) (ExamItem, error)
+	UpdateItemOccurrence(ctx context.Context, arg UpdateItemOccurrenceParams) (ExamItem, error)
+	UpdateQuestion(ctx context.Context, arg UpdateQuestionParams) (Question, error)
 }
 
 var _ Querier = (*Queries)(nil)

@@ -29,32 +29,55 @@ var (
 	ErrInvalid  = errors.New("store: invalid record")
 )
 
-// Reader is the read side used by Assemble. *sqlcgen.Queries satisfies it.
+// Reader is the read side used by Assemble and the API services.
+// *sqlcgen.Queries satisfies it.
 type Reader interface {
 	GetExam(ctx context.Context, examID pgtype.UUID) (sqlcgen.Exam, error)
 	ListSections(ctx context.Context, examID pgtype.UUID) ([]sqlcgen.ExamSection, error)
 	ListItems(ctx context.Context, sectionID pgtype.UUID) ([]sqlcgen.ExamItem, error)
+	ListExamItems(ctx context.Context, examID pgtype.UUID) ([]sqlcgen.ExamItem, error)
 	ListQuestions(ctx context.Context, question_ids []pgtype.UUID) ([]sqlcgen.Question, error)
 	ListAssets(ctx context.Context, asset_ids []string) ([]sqlcgen.Asset, error)
 	GetAsset(ctx context.Context, assetID string) (sqlcgen.Asset, error)
 	GetIngestJob(ctx context.Context, jobID pgtype.UUID) (sqlcgen.IngestJob, error)
+	ListQuestionReferenceCounts(ctx context.Context, question_ids []pgtype.UUID) ([]sqlcgen.ListQuestionReferenceCountsRow, error)
+	ListExamsPage(ctx context.Context, arg sqlcgen.ListExamsPageParams) ([]sqlcgen.Exam, error)
+	ListIngestJobsPage(ctx context.Context, arg sqlcgen.ListIngestJobsPageParams) ([]sqlcgen.IngestJob, error)
 }
 
-// Workspace is the transaction-scoped data access the assembler needs.
-// *sqlcgen.Queries bound to a transaction satisfies it; every method of one
-// Persist or Assemble call must share the same transaction.
+// Workspace is the transaction-scoped data access the assembler and the edit
+// service need. *sqlcgen.Queries bound to a transaction satisfies it; every
+// method of one Persist, Assemble or Edit call must share the same
+// transaction.
+//
+// Lock protocol: every path that adds or moves an exam_items reference takes
+// the referenced question rows with LockQuestions (sorted question_id order)
+// before writing the reference, so a concurrent edit's reference count can
+// never miss an attach. Exam and item locks follow exam -> exam_item ->
+// question, the one order every writer uses.
 type Workspace interface {
 	Reader
 	InsertAsset(ctx context.Context, arg sqlcgen.InsertAssetParams) (sqlcgen.Asset, error)
 	UpdateAssetDisplay(ctx context.Context, arg sqlcgen.UpdateAssetDisplayParams) (int64, error)
+	GetAssetForUpdate(ctx context.Context, assetID string) (sqlcgen.Asset, error)
+	SetAssetActiveVariant(ctx context.Context, arg sqlcgen.SetAssetActiveVariantParams) (sqlcgen.Asset, error)
 	ListQuestionsByFingerprint(ctx context.Context, arg sqlcgen.ListQuestionsByFingerprintParams) ([]sqlcgen.Question, error)
+	ListQuestionsByFingerprintForUpdate(ctx context.Context, arg sqlcgen.ListQuestionsByFingerprintForUpdateParams) ([]sqlcgen.Question, error)
+	LockQuestions(ctx context.Context, question_ids []pgtype.UUID) ([]pgtype.UUID, error)
+	GetQuestionForUpdate(ctx context.Context, questionID pgtype.UUID) (sqlcgen.Question, error)
 	InsertQuestion(ctx context.Context, arg sqlcgen.InsertQuestionParams) (sqlcgen.Question, error)
+	UpdateQuestion(ctx context.Context, arg sqlcgen.UpdateQuestionParams) (sqlcgen.Question, error)
+	DeleteQuestionIfUnreferenced(ctx context.Context, questionID pgtype.UUID) (int64, error)
 	GetExamByJob(ctx context.Context, ingestJobID pgtype.UUID) (sqlcgen.Exam, error)
+	GetExamForUpdate(ctx context.Context, examID pgtype.UUID) (sqlcgen.Exam, error)
 	InsertExam(ctx context.Context, arg sqlcgen.InsertExamParams) (sqlcgen.Exam, error)
 	UpdateExam(ctx context.Context, arg sqlcgen.UpdateExamParams) (sqlcgen.Exam, error)
 	DeleteSections(ctx context.Context, examID pgtype.UUID) (int64, error)
 	InsertSection(ctx context.Context, arg sqlcgen.InsertSectionParams) (sqlcgen.ExamSection, error)
 	InsertItem(ctx context.Context, arg sqlcgen.InsertItemParams) error
+	GetExamItemForUpdate(ctx context.Context, itemID pgtype.UUID) (sqlcgen.GetExamItemForUpdateRow, error)
+	CountQuestionReferences(ctx context.Context, questionID pgtype.UUID) (int64, error)
+	UpdateItem(ctx context.Context, arg sqlcgen.UpdateItemParams) (sqlcgen.ExamItem, error)
 	CompleteIngestJob(ctx context.Context, arg sqlcgen.CompleteIngestJobParams) (sqlcgen.IngestJob, error)
 }
 
@@ -228,16 +251,40 @@ func fromPGUUID(v pgtype.UUID) (uuid.UUID, error) {
 // WorkspaceTx binds a pgx transaction to the Workspace the assembler uses.
 func WorkspaceTx(tx pgx.Tx) *sqlcgen.Queries { return sqlcgen.New(tx) }
 
-// AssetRecord implements storage.AssetLookup for the renderer resolver.
+// AssetRecord implements storage.AssetLookup for the renderer resolver and the
+// asset endpoints. Every variant column is copied; a NULL column stays empty so
+// the resolver can tell "not present" from "present but unverified".
 func (r *Repository) AssetRecord(ctx context.Context, assetID string) (rec storage.AssetRecord, err error) {
 	err = r.Read(ctx, func(ctx context.Context, rd Reader) error {
 		row, err := rd.GetAsset(ctx, assetID)
 		if err != nil {
 			return err
 		}
-		rec = storage.AssetRecord{AssetID: row.AssetID, StorageKey: row.StorageKey, MediaType: row.MediaType, SHA256: row.Sha256,
-			RawStorageKey: row.RawStorageKey.String, RawSHA256: row.RawSha256.String}
+		rec = AssetRecordFromRow(row)
 		return nil
 	})
 	return rec, Translate(err)
+}
+
+// AssetRecordFromRow maps one assets row to the resolver's record.
+func AssetRecordFromRow(row sqlcgen.Asset) storage.AssetRecord {
+	return storage.AssetRecord{
+		AssetID:         row.AssetID,
+		MediaType:       row.MediaType,
+		Status:          row.Status,
+		StorageKey:      row.StorageKey,
+		SHA256:          row.Sha256,
+		RawStorageKey:   row.RawStorageKey.String,
+		RawSHA256:       row.RawSha256.String,
+		CleanStorageKey: row.CleanStorageKey.String,
+		CleanSHA256:     row.CleanSha256.String,
+		ActiveVariant:   storage.Variant(row.ActiveVariant),
+		Revision:        row.Revision,
+	}
+}
+
+// Ping reports whether PostgreSQL answers within ctx. /readyz uses it with a
+// short deadline.
+func (r *Repository) Ping(ctx context.Context) error {
+	return Translate(r.pool.Ping(ctx))
 }

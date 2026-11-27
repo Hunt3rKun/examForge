@@ -64,7 +64,9 @@ func TestWorkerCleanedUploadsTwoVerifiedObjects(t *testing.T) {
 	row := rows[0]
 	if row.Status != "cleaned" || !strings.HasPrefix(row.StorageKey, "assets/clean/") ||
 		!row.RawStorageKey.Valid || !strings.HasPrefix(row.RawStorageKey.String, "assets/raw/") ||
-		!row.RawSha256.Valid {
+		!row.RawSha256.Valid || !row.CleanStorageKey.Valid || row.CleanStorageKey.String != row.StorageKey ||
+		!row.CleanSha256.Valid || row.CleanSha256.String != row.Sha256 ||
+		row.ActiveVariant != string(storage.VariantClean) {
 		t.Fatalf("cleaned row = %+v", row)
 	}
 	// Source + raw + clean objects exist.
@@ -119,8 +121,13 @@ func TestWorkerRawCroppedUploadsSingleObject(t *testing.T) {
 		t.Fatalf("Work: %v", err)
 	}
 	row := db.Assets()[0]
+	// A raw_cropped asset has exactly one variant: the raw object, which is
+	// also the main object. There is no clean variant and no clean columns.
 	if row.Status != "raw_cropped" || !strings.HasPrefix(row.StorageKey, "assets/raw/") ||
-		row.RawStorageKey.Valid || row.RawSha256.Valid {
+		!row.RawStorageKey.Valid || row.RawStorageKey.String != row.StorageKey ||
+		!row.RawSha256.Valid || row.RawSha256.String != row.Sha256 ||
+		row.CleanStorageKey.Valid || row.CleanSha256.Valid ||
+		row.ActiveVariant != string(storage.VariantRaw) {
 		t.Fatalf("raw_cropped row = %+v", row)
 	}
 	if keys := objects.Keys(); len(keys) != 2 {

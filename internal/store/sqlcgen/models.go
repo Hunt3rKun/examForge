@@ -23,6 +23,10 @@ type Asset struct {
 	CreatedAt        pgtype.Timestamptz
 	UpdatedAt        pgtype.Timestamptz
 	RawSha256        pgtype.Text
+	CleanStorageKey  pgtype.Text
+	CleanSha256      pgtype.Text
+	ActiveVariant    string
+	Revision         int64
 }
 
 type Exam struct {
@@ -44,6 +48,8 @@ type ExamItem struct {
 	Ordinal               int32
 	DisplayNumberOverride pgtype.Text
 	ScoreOverride         pgtype.Float8
+	AnswerSpaceMmOverride pgtype.Float8
+	Revision              int64
 }
 
 type ExamSection struct {

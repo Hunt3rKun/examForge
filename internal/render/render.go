@@ -60,6 +60,11 @@ type AssetResolver interface {
 	Resolve(ctx context.Context, assetID string, asset ir.Asset) (io.ReadCloser, error)
 }
 
+// RenderScopedResolver creates an isolated asset snapshot/cache for one Render
+// call. Renderers detect it so a resolver cannot retain selector state between
+// separate documents.
+type RenderScopedResolver interface{ ForRender() AssetResolver }
+
 // RenderError is the error type every renderer failure wraps. Stderr is the
 // bounded, workspace-scrubbed output of the failed process, if any.
 type RenderError struct {

@@ -43,3 +43,15 @@ RETURNING *;
 
 -- name: DeleteIngestJob :execrows
 DELETE FROM ingest_jobs WHERE job_id = $1;
+
+-- Stable keyset pagination over jobs: created_at DESC, job_id DESC, with an
+-- optional state filter. A NULL cursor is encoded as infinity.
+-- name: ListIngestJobsPage :many
+SELECT * FROM ingest_jobs
+WHERE COALESCE(sqlc.narg('state')::text, state) = state
+  AND (created_at, job_id) < (
+      COALESCE(sqlc.narg('cursor_created_at')::timestamptz, 'infinity'::timestamptz),
+      COALESCE(sqlc.narg('cursor_job_id')::uuid, 'ffffffff-ffff-ffff-ffff-ffffffffffff'::uuid)
+  )
+ORDER BY created_at DESC, job_id DESC
+LIMIT sqlc.arg('page_limit');

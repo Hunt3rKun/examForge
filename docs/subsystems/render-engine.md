@@ -27,21 +27,31 @@ Purely declarative: consumes `payload.json` only. No Markdown/LaTeX/blank parsin
 
 `internal/storage/resolver.go` `S3AssetResolver` implements `render.AssetResolver`
 over the object store and the asset registry: it reads only the asset ID and
-declared media type from the IR (`uri`/`raw_uri` are never opened), looks up
-the registered `storage_key` and SHA-256, streams the object through a
+declared media type from the IR (`uri`/`raw_uri` are never opened), resolves the
+registered active variant's key and digest, streams the object through a
 digest-verifying, size-bounded reader, and maps store failures to
 `render.ErrAsset`/`render.ErrAssetTooLarge` while keeping transient
 `storage.ErrUnavailable` recognizable. `ForRender()` returns a render-scoped
 resolver that downloads each asset at most once (singleflight, bounded cache),
-so repeated references do not re-fetch. `cmd/exampipe` and
-`internal/pipeline/e2e_test.go` render persisted exams through it.
+so repeated references do not re-fetch. `TypstRenderer.Render` creates a fresh
+scope per call when the configured resolver implements `RenderScopedResolver`;
+`cmd/exampipe`, the resident API renderer, and `internal/pipeline/e2e_test.go`
+render persisted exams through this boundary.
 
 Slice 3: `AssetRecord` additionally carries `RawStorageKey`/`RawSHA256`, and
 `ResolveRaw` opens the raw companion object verified against its own
 registered digest. A companion without a digest (a pre-migration row) is
-refused — the clean digest never verifies raw bytes. Rendering itself always
-reads the main object, so `raw_cropped` (main = raw) and `cleaned`
-(main = clean) assets both render unchanged.
+refused — the clean digest never verifies raw bytes. Migration
+`migrations/0007_asset_variants.sql` adds explicit clean key/digest, active
+selector, and revision while retaining the legacy main columns. The resolver
+now supports `ResolveVariant` for `active`, `raw`, and `clean`; unavailable or
+unverified variants are rejected. `Resolve` follows the registry's active
+selector. Its render-scoped resolver snapshots each asset record once per
+render and keys cached bytes by asset ID, variant and registered object identity,
+so one render does not mix selector states. Slice 4A also exposes the active/raw/clean asset proxy and
+revision-guarded active-variant endpoint through `internal/api/routes.go`; the
+API-facing contracts and lifecycle are recorded in
+`docs/subsystems/pipeline-queue.md`.
 
 ### Fixtures
 
@@ -51,4 +61,14 @@ reads the main object, so `raw_cropped` (main = raw) and `cleaned`
 
 ## Boundaries
 
-Inline parsing belongs to Go `internal/ir/inline`; templates own layout only. Future expansion is through the `Renderer` interface (e.g. `DocxRenderer`, `LaTeXRenderer`) and the `AssetResolver` interface. Implemented resolvers are `LocalAssetResolver` (manifest under a directory) and `S3AssetResolver` (registry + object store); both are selectable by the caller without changing the renderer. No CGO; document tools are invoked through `os/exec` wrappers. Any external process must use `context.WithTimeout` and clean temporary files.
+The store layer assembles occurrence answer-space into Exam IR; see
+`docs/subsystems/exam-ir.md` and `docs/subsystems/pipeline-queue.md`. Slice 4A
+uses the existing renderer and asset resolver through the HTTP service; its
+route and lifecycle contract is documented in the pipeline subsystem page.
+Inline parsing belongs to Go `internal/ir/inline`; templates own layout only.
+Future expansion is through the `Renderer` interface (e.g. `DocxRenderer`,
+`LaTeXRenderer`) and the `AssetResolver` interface. Implemented resolvers are
+`LocalAssetResolver` (manifest under a directory) and `S3AssetResolver`
+(registry + object store); both are selectable by the caller without changing
+the renderer. No CGO; document tools are invoked through `os/exec` wrappers.
+Any external process must use `context.WithTimeout` and clean temporary files.

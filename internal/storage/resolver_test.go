@@ -165,6 +165,26 @@ func TestResolverBoundsSizeAndMapsTransientErrors(t *testing.T) {
 	}
 }
 
+func TestRenderScopeRejectsMismatchedAssetID(t *testing.T) {
+	ctx := context.Background()
+	store, lookup, record := seededStore(t, []byte("registered-png-bytes"))
+	resolver, err := NewS3AssetResolver(store, lookup, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	scope := resolver.ForRender().(*renderScope)
+	_, err = scope.Resolve(ctx, record.AssetID, ir.Asset{AssetID: "ast_other", MediaType: "image/png"})
+	if !errors.Is(err, render.ErrAsset) {
+		t.Fatalf("mismatched asset ID err = %v, want ErrAsset", err)
+	}
+	if lookup.calls != 0 {
+		t.Errorf("mismatched asset ID caused %d registry lookups, want 0", lookup.calls)
+	}
+	if assets, _ := scope.Cached(); assets != 0 {
+		t.Errorf("mismatched asset ID populated %d cache entries", assets)
+	}
+}
+
 func TestRenderScopeDownloadsEachAssetOnce(t *testing.T) {
 	ctx := context.Background()
 	data := []byte("one-download")

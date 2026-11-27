@@ -11,6 +11,20 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
+const countQuestionReferences = `-- name: CountQuestionReferences :one
+SELECT count(*) FROM exam_items WHERE question_id = $1
+`
+
+// Reference count of one question entity. Callers hold the question row lock
+// (FOR UPDATE) while counting, so a concurrent attach of the same question
+// cannot slip between the count and the rewrite.
+func (q *Queries) CountQuestionReferences(ctx context.Context, questionID pgtype.UUID) (int64, error) {
+	row := q.db.QueryRow(ctx, countQuestionReferences, questionID)
+	var count int64
+	err := row.Scan(&count)
+	return count, err
+}
+
 const deleteSections = `-- name: DeleteSections :execrows
 DELETE FROM exam_sections WHERE exam_id = $1
 `
@@ -66,6 +80,66 @@ func (q *Queries) GetExamByJob(ctx context.Context, ingestJobID pgtype.UUID) (Ex
 	return i, err
 }
 
+const getExamForUpdate = `-- name: GetExamForUpdate :one
+SELECT exam_id, ir_exam_id, ingest_job_id, source_file_sha256, source_pdf_key, schema_version, metadata_json, created_at, updated_at FROM exams WHERE exam_id = $1 FOR UPDATE
+`
+
+func (q *Queries) GetExamForUpdate(ctx context.Context, examID pgtype.UUID) (Exam, error) {
+	row := q.db.QueryRow(ctx, getExamForUpdate, examID)
+	var i Exam
+	err := row.Scan(
+		&i.ExamID,
+		&i.IrExamID,
+		&i.IngestJobID,
+		&i.SourceFileSha256,
+		&i.SourcePdfKey,
+		&i.SchemaVersion,
+		&i.MetadataJson,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
+}
+
+const getExamItemForUpdate = `-- name: GetExamItemForUpdate :one
+SELECT i.item_id, i.section_id, i.question_id, i.ordinal, i.display_number_override, i.score_override, i.answer_space_mm_override, i.revision, s.exam_id
+FROM exam_items i
+JOIN exam_sections s ON s.section_id = i.section_id
+WHERE i.item_id = $1
+FOR UPDATE OF i
+`
+
+type GetExamItemForUpdateRow struct {
+	ItemID                pgtype.UUID
+	SectionID             pgtype.UUID
+	QuestionID            pgtype.UUID
+	Ordinal               int32
+	DisplayNumberOverride pgtype.Text
+	ScoreOverride         pgtype.Float8
+	AnswerSpaceMmOverride pgtype.Float8
+	Revision              int64
+	ExamID                pgtype.UUID
+}
+
+// Locks one occurrence for an edit. The row must belong to the exam on the
+// path; the caller verifies that under the same lock.
+func (q *Queries) GetExamItemForUpdate(ctx context.Context, itemID pgtype.UUID) (GetExamItemForUpdateRow, error) {
+	row := q.db.QueryRow(ctx, getExamItemForUpdate, itemID)
+	var i GetExamItemForUpdateRow
+	err := row.Scan(
+		&i.ItemID,
+		&i.SectionID,
+		&i.QuestionID,
+		&i.Ordinal,
+		&i.DisplayNumberOverride,
+		&i.ScoreOverride,
+		&i.AnswerSpaceMmOverride,
+		&i.Revision,
+		&i.ExamID,
+	)
+	return i, err
+}
+
 const insertExam = `-- name: InsertExam :one
 INSERT INTO exams (
     ingest_job_id, ir_exam_id, source_file_sha256, source_pdf_key, schema_version, metadata_json
@@ -107,8 +181,10 @@ func (q *Queries) InsertExam(ctx context.Context, arg InsertExamParams) (Exam, e
 }
 
 const insertItem = `-- name: InsertItem :exec
-INSERT INTO exam_items (section_id, question_id, ordinal, display_number_override, score_override)
-VALUES ($1, $2, $3, $4, $5)
+INSERT INTO exam_items (
+    section_id, question_id, ordinal, display_number_override, score_override,
+    answer_space_mm_override
+) VALUES ($1, $2, $3, $4, $5, $6)
 `
 
 type InsertItemParams struct {
@@ -117,8 +193,11 @@ type InsertItemParams struct {
 	Ordinal               int32
 	DisplayNumberOverride pgtype.Text
 	ScoreOverride         pgtype.Float8
+	AnswerSpaceMmOverride pgtype.Float8
 }
 
+// answer_space_mm is an occurrence value: it belongs to this item, never to
+// the shared question entity.
 func (q *Queries) InsertItem(ctx context.Context, arg InsertItemParams) error {
 	_, err := q.db.Exec(ctx, insertItem,
 		arg.SectionID,
@@ -126,6 +205,7 @@ func (q *Queries) InsertItem(ctx context.Context, arg InsertItemParams) error {
 		arg.Ordinal,
 		arg.DisplayNumberOverride,
 		arg.ScoreOverride,
+		arg.AnswerSpaceMmOverride,
 	)
 	return err
 }
@@ -164,8 +244,93 @@ func (q *Queries) InsertSection(ctx context.Context, arg InsertSectionParams) (E
 	return i, err
 }
 
+const listExamItems = `-- name: ListExamItems :many
+SELECT i.item_id, i.section_id, i.question_id, i.ordinal, i.display_number_override, i.score_override, i.answer_space_mm_override, i.revision
+FROM exam_items i
+JOIN exam_sections s ON s.section_id = i.section_id
+WHERE s.exam_id = $1
+ORDER BY s.ordinal, i.ordinal
+`
+
+// Every occurrence of one exam in IR order (section ordinal, then item
+// ordinal). Used by the API detail view and by the edit transaction.
+func (q *Queries) ListExamItems(ctx context.Context, examID pgtype.UUID) ([]ExamItem, error) {
+	rows, err := q.db.Query(ctx, listExamItems, examID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []ExamItem{}
+	for rows.Next() {
+		var i ExamItem
+		if err := rows.Scan(
+			&i.ItemID,
+			&i.SectionID,
+			&i.QuestionID,
+			&i.Ordinal,
+			&i.DisplayNumberOverride,
+			&i.ScoreOverride,
+			&i.AnswerSpaceMmOverride,
+			&i.Revision,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listExamsPage = `-- name: ListExamsPage :many
+SELECT exam_id, ir_exam_id, ingest_job_id, source_file_sha256, source_pdf_key, schema_version, metadata_json, created_at, updated_at FROM exams
+WHERE (created_at, exam_id) < (
+    COALESCE($1::timestamptz, 'infinity'::timestamptz),
+    COALESCE($2::uuid, 'ffffffff-ffff-ffff-ffff-ffffffffffff'::uuid)
+)
+ORDER BY created_at DESC, exam_id DESC
+LIMIT $3
+`
+
+type ListExamsPageParams struct {
+	CursorCreatedAt pgtype.Timestamptz
+	CursorExamID    pgtype.UUID
+	PageLimit       int32
+}
+
+func (q *Queries) ListExamsPage(ctx context.Context, arg ListExamsPageParams) ([]Exam, error) {
+	rows, err := q.db.Query(ctx, listExamsPage, arg.CursorCreatedAt, arg.CursorExamID, arg.PageLimit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []Exam{}
+	for rows.Next() {
+		var i Exam
+		if err := rows.Scan(
+			&i.ExamID,
+			&i.IrExamID,
+			&i.IngestJobID,
+			&i.SourceFileSha256,
+			&i.SourcePdfKey,
+			&i.SchemaVersion,
+			&i.MetadataJson,
+			&i.CreatedAt,
+			&i.UpdatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listItems = `-- name: ListItems :many
-SELECT item_id, section_id, question_id, ordinal, display_number_override, score_override FROM exam_items WHERE section_id = $1 ORDER BY ordinal
+SELECT item_id, section_id, question_id, ordinal, display_number_override, score_override, answer_space_mm_override, revision FROM exam_items WHERE section_id = $1 ORDER BY ordinal
 `
 
 func (q *Queries) ListItems(ctx context.Context, sectionID pgtype.UUID) ([]ExamItem, error) {
@@ -184,7 +349,45 @@ func (q *Queries) ListItems(ctx context.Context, sectionID pgtype.UUID) ([]ExamI
 			&i.Ordinal,
 			&i.DisplayNumberOverride,
 			&i.ScoreOverride,
+			&i.AnswerSpaceMmOverride,
+			&i.Revision,
 		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listQuestionReferenceCounts = `-- name: ListQuestionReferenceCounts :many
+SELECT question_id, count(*) AS references
+FROM exam_items
+WHERE question_id = ANY($1::uuid[])
+GROUP BY question_id
+`
+
+type ListQuestionReferenceCountsRow struct {
+	QuestionID pgtype.UUID
+	References int64
+}
+
+// Stable keyset pagination: created_at DESC, exam_id DESC. A NULL cursor is
+// encoded as infinity, so the first page starts at the newest exam.
+// Reference counts for one exam's questions, so a detail view can say which
+// items point at a shared entity.
+func (q *Queries) ListQuestionReferenceCounts(ctx context.Context, questionIds []pgtype.UUID) ([]ListQuestionReferenceCountsRow, error) {
+	rows, err := q.db.Query(ctx, listQuestionReferenceCounts, questionIds)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []ListQuestionReferenceCountsRow{}
+	for rows.Next() {
+		var i ListQuestionReferenceCountsRow
+		if err := rows.Scan(&i.QuestionID, &i.References); err != nil {
 			return nil, err
 		}
 		items = append(items, i)
@@ -264,6 +467,87 @@ func (q *Queries) UpdateExam(ctx context.Context, arg UpdateExamParams) (Exam, e
 		&i.MetadataJson,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+	)
+	return i, err
+}
+
+const updateItem = `-- name: UpdateItem :one
+UPDATE exam_items
+SET question_id = $2, display_number_override = $3, score_override = $4,
+    answer_space_mm_override = $5, revision = revision + 1
+WHERE item_id = $1 AND revision = $6
+RETURNING item_id, section_id, question_id, ordinal, display_number_override, score_override, answer_space_mm_override, revision
+`
+
+type UpdateItemParams struct {
+	ItemID                pgtype.UUID
+	QuestionID            pgtype.UUID
+	DisplayNumberOverride pgtype.Text
+	ScoreOverride         pgtype.Float8
+	AnswerSpaceMmOverride pgtype.Float8
+	Revision              int64
+}
+
+// One edit statement: entity relink (when the shared entity was cloned) and
+// occurrence values change together, and the revision compare-and-set makes a
+// stale If-Match fail instead of silently winning.
+func (q *Queries) UpdateItem(ctx context.Context, arg UpdateItemParams) (ExamItem, error) {
+	row := q.db.QueryRow(ctx, updateItem,
+		arg.ItemID,
+		arg.QuestionID,
+		arg.DisplayNumberOverride,
+		arg.ScoreOverride,
+		arg.AnswerSpaceMmOverride,
+		arg.Revision,
+	)
+	var i ExamItem
+	err := row.Scan(
+		&i.ItemID,
+		&i.SectionID,
+		&i.QuestionID,
+		&i.Ordinal,
+		&i.DisplayNumberOverride,
+		&i.ScoreOverride,
+		&i.AnswerSpaceMmOverride,
+		&i.Revision,
+	)
+	return i, err
+}
+
+const updateItemOccurrence = `-- name: UpdateItemOccurrence :one
+UPDATE exam_items
+SET display_number_override = $2, score_override = $3,
+    answer_space_mm_override = $4, revision = revision + 1
+WHERE item_id = $1 AND revision = $5
+RETURNING item_id, section_id, question_id, ordinal, display_number_override, score_override, answer_space_mm_override, revision
+`
+
+type UpdateItemOccurrenceParams struct {
+	ItemID                pgtype.UUID
+	DisplayNumberOverride pgtype.Text
+	ScoreOverride         pgtype.Float8
+	AnswerSpaceMmOverride pgtype.Float8
+	Revision              int64
+}
+
+func (q *Queries) UpdateItemOccurrence(ctx context.Context, arg UpdateItemOccurrenceParams) (ExamItem, error) {
+	row := q.db.QueryRow(ctx, updateItemOccurrence,
+		arg.ItemID,
+		arg.DisplayNumberOverride,
+		arg.ScoreOverride,
+		arg.AnswerSpaceMmOverride,
+		arg.Revision,
+	)
+	var i ExamItem
+	err := row.Scan(
+		&i.ItemID,
+		&i.SectionID,
+		&i.QuestionID,
+		&i.Ordinal,
+		&i.DisplayNumberOverride,
+		&i.ScoreOverride,
+		&i.AnswerSpaceMmOverride,
+		&i.Revision,
 	)
 	return i, err
 }

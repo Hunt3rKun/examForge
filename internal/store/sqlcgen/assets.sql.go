@@ -25,7 +25,7 @@ func (q *Queries) DeleteAssets(ctx context.Context, assetIds []string) (int64, e
 }
 
 const getAsset = `-- name: GetAsset :one
-SELECT asset_id, media_type, storage_key, raw_storage_key, status, aspect_ratio, suggested_width_mm, caption, alt, source_bbox, sha256, created_at, updated_at, raw_sha256 FROM assets WHERE asset_id = $1
+SELECT asset_id, media_type, storage_key, raw_storage_key, status, aspect_ratio, suggested_width_mm, caption, alt, source_bbox, sha256, created_at, updated_at, raw_sha256, clean_storage_key, clean_sha256, active_variant, revision FROM assets WHERE asset_id = $1
 `
 
 func (q *Queries) GetAsset(ctx context.Context, assetID string) (Asset, error) {
@@ -46,6 +46,40 @@ func (q *Queries) GetAsset(ctx context.Context, assetID string) (Asset, error) {
 		&i.CreatedAt,
 		&i.UpdatedAt,
 		&i.RawSha256,
+		&i.CleanStorageKey,
+		&i.CleanSha256,
+		&i.ActiveVariant,
+		&i.Revision,
+	)
+	return i, err
+}
+
+const getAssetForUpdate = `-- name: GetAssetForUpdate :one
+SELECT asset_id, media_type, storage_key, raw_storage_key, status, aspect_ratio, suggested_width_mm, caption, alt, source_bbox, sha256, created_at, updated_at, raw_sha256, clean_storage_key, clean_sha256, active_variant, revision FROM assets WHERE asset_id = $1 FOR UPDATE
+`
+
+func (q *Queries) GetAssetForUpdate(ctx context.Context, assetID string) (Asset, error) {
+	row := q.db.QueryRow(ctx, getAssetForUpdate, assetID)
+	var i Asset
+	err := row.Scan(
+		&i.AssetID,
+		&i.MediaType,
+		&i.StorageKey,
+		&i.RawStorageKey,
+		&i.Status,
+		&i.AspectRatio,
+		&i.SuggestedWidthMm,
+		&i.Caption,
+		&i.Alt,
+		&i.SourceBbox,
+		&i.Sha256,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+		&i.RawSha256,
+		&i.CleanStorageKey,
+		&i.CleanSha256,
+		&i.ActiveVariant,
+		&i.Revision,
 	)
 	return i, err
 }
@@ -53,10 +87,11 @@ func (q *Queries) GetAsset(ctx context.Context, assetID string) (Asset, error) {
 const insertAsset = `-- name: InsertAsset :one
 INSERT INTO assets (
     asset_id, media_type, storage_key, raw_storage_key, status,
-    aspect_ratio, suggested_width_mm, caption, alt, source_bbox, sha256, raw_sha256
-) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+    aspect_ratio, suggested_width_mm, caption, alt, source_bbox, sha256, raw_sha256,
+    clean_storage_key, clean_sha256, active_variant
+) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
 ON CONFLICT (asset_id) DO NOTHING
-RETURNING asset_id, media_type, storage_key, raw_storage_key, status, aspect_ratio, suggested_width_mm, caption, alt, source_bbox, sha256, created_at, updated_at, raw_sha256
+RETURNING asset_id, media_type, storage_key, raw_storage_key, status, aspect_ratio, suggested_width_mm, caption, alt, source_bbox, sha256, created_at, updated_at, raw_sha256, clean_storage_key, clean_sha256, active_variant, revision
 `
 
 type InsertAssetParams struct {
@@ -72,6 +107,9 @@ type InsertAssetParams struct {
 	SourceBbox       []byte
 	Sha256           string
 	RawSha256        pgtype.Text
+	CleanStorageKey  pgtype.Text
+	CleanSha256      pgtype.Text
+	ActiveVariant    string
 }
 
 // Concurrent ingests of equal content may race here: both read no row, then
@@ -93,6 +131,9 @@ func (q *Queries) InsertAsset(ctx context.Context, arg InsertAssetParams) (Asset
 		arg.SourceBbox,
 		arg.Sha256,
 		arg.RawSha256,
+		arg.CleanStorageKey,
+		arg.CleanSha256,
+		arg.ActiveVariant,
 	)
 	var i Asset
 	err := row.Scan(
@@ -110,12 +151,16 @@ func (q *Queries) InsertAsset(ctx context.Context, arg InsertAssetParams) (Asset
 		&i.CreatedAt,
 		&i.UpdatedAt,
 		&i.RawSha256,
+		&i.CleanStorageKey,
+		&i.CleanSha256,
+		&i.ActiveVariant,
+		&i.Revision,
 	)
 	return i, err
 }
 
 const listAssets = `-- name: ListAssets :many
-SELECT asset_id, media_type, storage_key, raw_storage_key, status, aspect_ratio, suggested_width_mm, caption, alt, source_bbox, sha256, created_at, updated_at, raw_sha256 FROM assets WHERE asset_id = ANY($1::text[]) ORDER BY asset_id
+SELECT asset_id, media_type, storage_key, raw_storage_key, status, aspect_ratio, suggested_width_mm, caption, alt, source_bbox, sha256, created_at, updated_at, raw_sha256, clean_storage_key, clean_sha256, active_variant, revision FROM assets WHERE asset_id = ANY($1::text[]) ORDER BY asset_id
 `
 
 func (q *Queries) ListAssets(ctx context.Context, assetIds []string) ([]Asset, error) {
@@ -142,6 +187,10 @@ func (q *Queries) ListAssets(ctx context.Context, assetIds []string) ([]Asset, e
 			&i.CreatedAt,
 			&i.UpdatedAt,
 			&i.RawSha256,
+			&i.CleanStorageKey,
+			&i.CleanSha256,
+			&i.ActiveVariant,
+			&i.Revision,
 		); err != nil {
 			return nil, err
 		}
@@ -151,6 +200,48 @@ func (q *Queries) ListAssets(ctx context.Context, assetIds []string) ([]Asset, e
 		return nil, err
 	}
 	return items, nil
+}
+
+const setAssetActiveVariant = `-- name: SetAssetActiveVariant :one
+UPDATE assets
+SET active_variant = $2, revision = revision + 1, updated_at = now()
+WHERE asset_id = $1 AND revision = $3
+RETURNING asset_id, media_type, storage_key, raw_storage_key, status, aspect_ratio, suggested_width_mm, caption, alt, source_bbox, sha256, created_at, updated_at, raw_sha256, clean_storage_key, clean_sha256, active_variant, revision
+`
+
+type SetAssetActiveVariantParams struct {
+	AssetID       string
+	ActiveVariant string
+	Revision      int64
+}
+
+// The selector switch is a compare-and-set on revision, so a stale If-Match
+// never silently wins. It only rewrites the selector and revision: both
+// variants keep their key and digest.
+func (q *Queries) SetAssetActiveVariant(ctx context.Context, arg SetAssetActiveVariantParams) (Asset, error) {
+	row := q.db.QueryRow(ctx, setAssetActiveVariant, arg.AssetID, arg.ActiveVariant, arg.Revision)
+	var i Asset
+	err := row.Scan(
+		&i.AssetID,
+		&i.MediaType,
+		&i.StorageKey,
+		&i.RawStorageKey,
+		&i.Status,
+		&i.AspectRatio,
+		&i.SuggestedWidthMm,
+		&i.Caption,
+		&i.Alt,
+		&i.SourceBbox,
+		&i.Sha256,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+		&i.RawSha256,
+		&i.CleanStorageKey,
+		&i.CleanSha256,
+		&i.ActiveVariant,
+		&i.Revision,
+	)
+	return i, err
 }
 
 const updateAssetDisplay = `-- name: UpdateAssetDisplay :execrows

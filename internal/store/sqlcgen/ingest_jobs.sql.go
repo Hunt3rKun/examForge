@@ -194,6 +194,65 @@ func (q *Queries) InsertIngestJob(ctx context.Context, arg InsertIngestJobParams
 	return i, err
 }
 
+const listIngestJobsPage = `-- name: ListIngestJobsPage :many
+SELECT job_id, source_pdf_key, source_file_sha256, exam_id, river_job_id, state, attempt_count, error_code, error_message, created_at, updated_at, started_at, finished_at FROM ingest_jobs
+WHERE COALESCE($1::text, state) = state
+  AND (created_at, job_id) < (
+      COALESCE($2::timestamptz, 'infinity'::timestamptz),
+      COALESCE($3::uuid, 'ffffffff-ffff-ffff-ffff-ffffffffffff'::uuid)
+  )
+ORDER BY created_at DESC, job_id DESC
+LIMIT $4
+`
+
+type ListIngestJobsPageParams struct {
+	State           pgtype.Text
+	CursorCreatedAt pgtype.Timestamptz
+	CursorJobID     pgtype.UUID
+	PageLimit       int32
+}
+
+// Stable keyset pagination over jobs: created_at DESC, job_id DESC, with an
+// optional state filter. A NULL cursor is encoded as infinity.
+func (q *Queries) ListIngestJobsPage(ctx context.Context, arg ListIngestJobsPageParams) ([]IngestJob, error) {
+	rows, err := q.db.Query(ctx, listIngestJobsPage,
+		arg.State,
+		arg.CursorCreatedAt,
+		arg.CursorJobID,
+		arg.PageLimit,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []IngestJob{}
+	for rows.Next() {
+		var i IngestJob
+		if err := rows.Scan(
+			&i.JobID,
+			&i.SourcePdfKey,
+			&i.SourceFileSha256,
+			&i.ExamID,
+			&i.RiverJobID,
+			&i.State,
+			&i.AttemptCount,
+			&i.ErrorCode,
+			&i.ErrorMessage,
+			&i.CreatedAt,
+			&i.UpdatedAt,
+			&i.StartedAt,
+			&i.FinishedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const moveIngestJob = `-- name: MoveIngestJob :one
 UPDATE ingest_jobs
 SET state = $2, updated_at = now()

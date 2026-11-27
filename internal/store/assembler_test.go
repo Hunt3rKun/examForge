@@ -333,8 +333,18 @@ func TestFingerprintIsDeterministicAndVersioned(t *testing.T) {
 			}
 		}
 	}
-	if store.FingerprintVersion != 1 {
-		t.Errorf("store.FingerprintVersion = %d; a change needs a migration and backfill", store.FingerprintVersion)
+	// Version 2 owns the current canonicalization; version 1 rows stay readable
+	// but are never compared against v2 fingerprints.
+	if store.FingerprintVersion != 2 || store.LegacyFingerprintVersion != 1 {
+		t.Errorf("store.FingerprintVersion = %d (legacy %d); a change needs a migration and backfill",
+			store.FingerprintVersion, store.LegacyFingerprintVersion)
+	}
+	// answer_space_mm is an occurrence value since v2 and must not move the hash.
+	withSpace := firstQuestion(exam)
+	withSpace.AnswerSpaceMM = 42
+	base, _ := store.QuestionFingerprint(firstQuestion(exam))
+	if got, err := store.QuestionFingerprint(withSpace); err != nil || got != base {
+		t.Errorf("answer_space_mm changed the v2 fingerprint: %v", err)
 	}
 }
 
