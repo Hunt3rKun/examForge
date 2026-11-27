@@ -32,10 +32,11 @@ if [[ "${1:-}" == "--offline-only" ]]; then
 fi
 
 # ── Toolchain ────────────────────────────────────────────────────────────────
-for tool in typst prlimit mutool pdftotext pdfinfo staticcheck; do
+for tool in typst prlimit mutool pdftotext pdfinfo staticcheck sqlc; do
   command -v "$tool" >/dev/null 2>&1 || fail "required executable not found: $tool"
 done
 typst --version 2>/dev/null | grep -q '^typst 0\.15\.' || fail "Typst 0.15.x is required"
+[[ "$(sqlc version)" == "v1.31.1" ]] || fail "sqlc v1.31.1 is required, found $(sqlc version)"
 typst fonts --font-path third_party/fonts --ignore-system-fonts 2>/dev/null |
   grep -qx 'Noto Sans CJK SC' || fail "vendored font not found: Noto Sans CJK SC"
 
@@ -49,6 +50,14 @@ go run ./cmd/ircheck -schema schemas/exam-ir-v1.json -dir testdata/golden/ir
 go run ./cmd/ircheck -schema schemas/layout-spec-v1.json -dir testdata/golden/layout
 go run ./cmd/ircheck -schema schemas/exam-ir-v1.json -dir testdata/render/ir
 go run ./cmd/ircheck -schema schemas/layout-spec-v1.json -dir testdata/render/layouts
+
+# ── sqlc drift gate ─────────────────────────────────────────────────────────
+# Generated code is committed. Regenerating must change nothing; a missing
+# config or query file fails here instead of shipping a stale store.
+[[ -f sqlc.yaml ]] || fail "sqlc.yaml is missing"
+[[ -d internal/store/queries ]] || fail "internal/store/queries is missing"
+[[ -d internal/store/sqlcgen ]] || fail "internal/store/sqlcgen is missing"
+sqlc diff || fail "sqlc generated code is stale; run sqlc generate"
 
 # ── CLI resource check (schemas, template, vendored package, assets) ─────────
 go run ./cmd/examrender -check \

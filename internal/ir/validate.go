@@ -173,6 +173,18 @@ func (v *Validator) DecodeLayoutSpec(r io.Reader) (LayoutSpec, error) {
 	return layout, nil
 }
 
+// ValidateExamDTO validates an in-memory Exam IR through the compiled schema
+// and the semantic rules. It is the gate for DTOs that did not arrive as
+// bytes (parser output, assembled documents) before they are persisted or
+// rendered. It never mutates the input.
+func (v *Validator) ValidateExamDTO(exam ExamDocumentIR) error {
+	data, err := json.Marshal(exam)
+	if err != nil {
+		return fmt.Errorf("marshal Exam IR: %w", err)
+	}
+	return v.ValidateExam(data)
+}
+
 func ValidateExamIR(schemaPath string, exam ExamDocumentIR) error {
 	data, err := json.Marshal(exam)
 	if err != nil {

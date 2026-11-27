@@ -2,6 +2,8 @@
 /bin/
 /build/
 /dist/
+/exampipe
+/examrender
 *.exe
 *.test
 *.out

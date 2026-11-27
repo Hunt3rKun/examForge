@@ -28,5 +28,7 @@ jobs:
           typst --version
       - name: Install staticcheck
         run: go install honnef.co/go/tools/cmd/staticcheck@v0.8.2
+      - name: Install pinned sqlc
+        run: go install github.com/sqlc-dev/sqlc/cmd/sqlc@v1.31.1
       - name: Run verification gate
         run: ./scripts/verify.sh

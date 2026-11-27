@@ -4,5 +4,5 @@ These documents describe implemented behavior, not desired future designs. Keep 
 
 - [Exam IR](exam-ir.md)
 - [Render engine](render-engine.md)
-- [Pipeline and queue](pipeline-queue.md)
+- [Pipeline, queue and storage](pipeline-queue.md)
 - [Vision and parser](vision-parser.md)

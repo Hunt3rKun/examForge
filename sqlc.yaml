@@ -1,0 +1,15 @@
+# Pinned tool: sqlc v1.31.1 (scripts/verify.sh checks the version and the
+# generated directory for drift). The schema is the app migrations directory;
+# River's tables are owned by rivermigrate and are deliberately absent.
+version: "2"
+sql:
+  - engine: postgresql
+    schema: migrations
+    queries: internal/store/queries
+    gen:
+      go:
+        package: sqlcgen
+        out: internal/store/sqlcgen
+        sql_package: pgx/v5
+        emit_interface: true
+        emit_empty_slices: true

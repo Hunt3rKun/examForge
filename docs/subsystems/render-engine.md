@@ -20,8 +20,21 @@ Purely declarative: consumes `payload.json` only. No Markdown/LaTeX/blank parsin
 ### CLI and gate
 
 - `cmd/examrender/main.go`: `examrender -ir <exam.json> -layout <layout.json> -assets <dir> -out <file.pdf>` with optional `-schemas`, `-templates`, `-packages`, `-typst`, `-timeout`, `-check` (validate + precompile only). Schemas are compiled once; inputs are validated and decoded from the same bytes; the output may not overwrite any input or symlink target; output is written atomically with mode 0644, fsync and directory fsync; warnings go to stderr.
-- `scripts/verify.sh`: offline gate — pinned Typst 0.15.x + vendored font checks, `gofmt -l`, `go vet`, `staticcheck`, `go test -race -count=1 ./...`, `ircheck` on golden and render fixtures, `examrender -check`, student/teacher renders with `pdfinfo` assertions, byte-identical repeated render, then a network-cut (`unshare -r -n`) offline re-render stage. `.github/workflows/verify.yml` runs the same gate with pinned tool versions.
+- `scripts/verify.sh`: offline gate — pinned Typst 0.15.x, vendored font, and sqlc v1.31.1 checks, `gofmt -l`, `go vet`, `staticcheck`, `go test -race -count=1 ./...`, `ircheck` on golden and render fixtures, `sqlc diff` drift gate, `examrender -check`, student/teacher renders with `pdfinfo` assertions, byte-identical repeated render, then a network-cut (`unshare -r -n`) offline re-render stage. `.github/workflows/verify.yml` runs the same gate with pinned tool versions.
 - Physical tests: `internal/render/typst_real_test.go` asserts real PDF geometry via `pdftotext -bbox`/`pdfinfo` (grid ladder placement, paper sizes, binding position, per-page header/footer, float column narrowing, student/teacher reserve gap, offline render, workspace zero-residue). Fake-process tests: `internal/render/process_test.go` (semaphore bound, cancellation, timeout, stderr truncation, orphan cleanup).
+
+### Asset resolver for persisted exams (slice 2)
+
+`internal/storage/resolver.go` `S3AssetResolver` implements `render.AssetResolver`
+over the object store and the asset registry: it reads only the asset ID and
+declared media type from the IR (`uri`/`raw_uri` are never opened), looks up
+the registered `storage_key` and SHA-256, streams the object through a
+digest-verifying, size-bounded reader, and maps store failures to
+`render.ErrAsset`/`render.ErrAssetTooLarge` while keeping transient
+`storage.ErrUnavailable` recognizable. `ForRender()` returns a render-scoped
+resolver that downloads each asset at most once (singleflight, bounded cache),
+so repeated references do not re-fetch. `cmd/exampipe` and
+`internal/pipeline/e2e_test.go` render persisted exams through it.
 
 ### Fixtures
 
@@ -31,4 +44,4 @@ Purely declarative: consumes `payload.json` only. No Markdown/LaTeX/blank parsin
 
 ## Boundaries
 
-Inline parsing belongs to Go `internal/ir/inline`; templates own layout only. Future expansion is through the `Renderer` interface (e.g. `DocxRenderer`, `LaTeXRenderer`) and the `AssetResolver` interface (e.g. network stores); this slice delivers only local assets and Typst PDF. No CGO; document tools are invoked through `os/exec` wrappers. Any external process must use `context.WithTimeout` and clean temporary files.
+Inline parsing belongs to Go `internal/ir/inline`; templates own layout only. Future expansion is through the `Renderer` interface (e.g. `DocxRenderer`, `LaTeXRenderer`) and the `AssetResolver` interface. Implemented resolvers are `LocalAssetResolver` (manifest under a directory) and `S3AssetResolver` (registry + object store); both are selectable by the caller without changing the renderer. No CGO; document tools are invoked through `os/exec` wrappers. Any external process must use `context.WithTimeout` and clean temporary files.
