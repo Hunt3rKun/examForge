@@ -86,7 +86,9 @@ public exposure. No frontend or DOCX output is implemented.
 ### Slice 4A API and server
 
 - `api/openapi.yaml` is the OpenAPI 3.1 transport contract; `cmd/openapicheck`
-  checks its structure and local references offline. This is a structural
+  checks its structure and resolves every local `$ref` file and JSON Pointer
+  fragment offline. It rejects remote references and lexical or symlink-based
+  path traversal, and compiles each reached JSON schema. This is a structural
   reference checker, not a full OpenAPI validator or client generator.
 - `internal/api/` implements the method/path routes for health/readiness, PDF
   ingest, paginated job/exam catalogs and detail, source-PDF proxy, occurrence
@@ -94,7 +96,12 @@ public exposure. No frontend or DOCX output is implemented.
   DTOs keep item revisions and asset selector state outside Exam IR v1. The
   package owns request IDs, generic error envelopes, CORS allowlist, body caps,
   route deadlines/semaphores, bounded warnings, strong ETags, and access logs
-  that use route templates rather than resource IDs.
+  that use route templates rather than resource IDs. Item PATCH returns the
+  updated `item` plus revision metadata; required `stem`/`options` reject null,
+  an empty `provenance.review_status` clears that field, and scores above
+  1,000,000 return 422. Asset GET honors exact `If-None-Match` digest matches
+  with 304; render validation failures use the error envelope and may include
+  path details.
 - `internal/api/domain.go` adapts `Repository`/`Assembler` operations to the
   `Domain` seam. `internal/store/catalog.go` supplies catalog projections and
   consistent exam snapshots; `internal/store/edit.go` supplies occurrence

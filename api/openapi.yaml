@@ -112,11 +112,12 @@ paths:
       operationId: patchExamItem
       description: >-
         Requires a strong If-Match ETag. Null explicitly clears only nullable scalar/text fields
-        (stem, answer, analysis, metadata, display_number, score, answer_space_mm).
-        Omitted fields are unchanged. Null is not a deletion operation for required fields;
-        options, provenance, and review_status must be non-null when supplied. Empty arrays or
-        objects are not equivalent to null. Question kind, hierarchy, ordering and asset identity
-        cannot be changed by this operation.
+        (answer, analysis, metadata, display_number, score, answer_space_mm). Omitted fields are
+        unchanged. Null is rejected for required fields (stem and options), provenance, and
+        review_status. To clear review_status, send provenance.review_status as the empty string;
+        provenance must contain review_status when supplied, so provenance:{} is rejected. Empty
+        arrays or objects are not equivalent to null. Question kind, hierarchy, ordering and asset
+        identity cannot be changed by this operation.
       parameters:
         - { $ref: '#/components/parameters/IfMatch' }
       requestBody:
@@ -154,9 +155,10 @@ paths:
           in: query
           description: active selects the current registered selector; omitted means active.
           schema: { type: string, enum: [active, clean, raw], default: active }
+        - { $ref: '#/components/parameters/IfNoneMatch' }
       responses:
         '200':
-          description: Validated image asset
+          description: Validated image asset. If-None-Match is compared with the strong digest ETag.
           headers:
             ETag: { $ref: '#/components/headers/ETag' }
             X-Content-Type-Options: { schema: { type: string, const: nosniff } }
@@ -168,6 +170,8 @@ paths:
             image/gif: { schema: { type: string, format: binary } }
             image/webp: { schema: { type: string, format: binary } }
             image/svg+xml: { schema: { type: string, format: binary } }
+        '304': { $ref: '#/components/responses/NotModified' }
+        '400': { $ref: '#/components/responses/BadRequest' }
         '404': { $ref: '#/components/responses/VariantNotFound' }
         default: { $ref: '#/components/responses/DefaultError' }
   /api/v1/assets/{asset_id}/active-variant:
@@ -248,16 +252,28 @@ components:
       required: true
       description: Strong ETag copied verbatim from the resource representation.
       schema: { type: string, minLength: 1 }
+    IfNoneMatch:
+      name: If-None-Match
+      in: header
+      required: false
+      description: Strong content ETag used for conditional asset GETs; a match returns 304 without a body.
+      schema: { type: string, minLength: 1 }
   headers:
     ETag: { description: Strong resource or artifact validator., schema: { type: string } }
     Location: { description: URL of the created job., schema: { type: string, format: uri-reference } }
     RequestId: { description: Request correlation identifier., schema: { type: string } }
   responses:
     BadRequest: { description: Malformed request., content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } } }
+    NotModified:
+      description: Asset bytes have not changed for the supplied If-None-Match ETag.
+      headers:
+        ETag: { $ref: '#/components/headers/ETag' }
     NotFound: { description: Resource not found., content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } } }
     VariantNotFound: { description: Resource or requested variant not found., content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } } }
     TooLarge: { description: Request exceeds a configured body limit., content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } } }
-    ValidationError: { description: Semantically invalid request., content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } } }
+    ValidationError:
+      description: Semantically invalid request. The envelope may include details with path, code, and message; render validation uses path layout when the layout cannot be decoded.
+      content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } }
     Unavailable: { description: Dependency unavailable or service not ready., content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } } }
     DefaultError:
       description: Error response. All JSON errors include request_id.
@@ -395,19 +411,21 @@ components:
         provenance:
           type: object
           additionalProperties: false
+          required: [review_status]
           properties:
             review_status:
               type: string
-              enum: [pending, approved, rejected]
-              description: Must not be null; omission leaves review status unchanged.
+              enum: ['', pending, approved, rejected]
+              description: Empty string clears review_status; null is rejected; omission leaves it unchanged.
         display_number: { type: [string, 'null'], maxLength: 128, description: Null clears the optional display number; omission leaves it unchanged. }
-        score: { type: [number, 'null'], minimum: 0, description: Null clears the optional score; omission leaves it unchanged. }
+        score: { type: [number, 'null'], minimum: 0, maximum: 1000000, description: Null clears the optional score; values above 1000000 are rejected; omission leaves it unchanged. }
         answer_space_mm: { type: [number, 'null'], minimum: 0, description: Null clears the occurrence override; omission leaves it unchanged. }
     PatchedItem:
       type: object
-      required: [item_id, revision, etag]
+      required: [item_id, revision, etag, item]
       properties:
         item_id: { type: string, format: uuid }
         revision: { type: integer, minimum: 1 }
         etag: { type: string }
         question_id: { type: string, format: uuid }
+        item: { $ref: '../schemas/exam-ir-v1.json#/$defs/question' }
