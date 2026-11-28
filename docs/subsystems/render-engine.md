@@ -53,6 +53,30 @@ revision-guarded active-variant endpoint through `internal/api/routes.go`; the
 API-facing contracts and lifecycle are recorded in
 `docs/subsystems/pipeline-queue.md`.
 
+### Browser source and render preview (slice 4B)
+
+- `web/src/features/workbench/PdfPane.tsx` and `web/src/pdf/` load complete PDF
+  bytes from the source proxy, draw a bounded canvas for the current page,
+  and project the selected question's provenance boxes into the viewport.
+  The viewer exposes page navigation, zoom, rotation, and a page-only fallback
+  when precise boxes are unavailable. It cancels obsolete work and releases
+  the canvas and PDF.js document on teardown.
+- `web/src/render/layout-presets.ts` provides student A4, teacher A4, and
+  two-column A3 LayoutSpecs. `web/src/features/workbench/RenderPreview.tsx`
+  submits the selected LayoutSpec to the HTTP render endpoint for the saved
+  exam; unsaved edits block preview and download. The preview shows bounded
+  warning summaries and uses the same PDF.js viewer. `web/src/render/render-client.ts`
+  manages request cancellation and generated PDF Blob URL cleanup. Typst
+  still determines final layout; the browser displays its PDF bytes.
+- `web/src/main.tsx` bundles KaTeX CSS/fonts and the pinned PDF.js worker.
+  `web/src/pdf/document-loader.ts` loads packed CMaps and standard fonts from
+  same-origin `pdfjs/` paths; `web/vite.config.ts` serves them in development
+  and emits them into `web/dist` in production. `scripts/verify-web.sh`
+  checks the built assets and rejects external resource URLs.
+- **Not tried for Web 4B:** real-browser offline asset loading, visual
+  inspection of a Chinese/math PDF and high-DPR bounding-box alignment, or
+  real-service preview and download.
+
 ### Fixtures
 
 - `testdata/golden/assets/` (`manifest.json`, `sample_fig.png`): golden assets.

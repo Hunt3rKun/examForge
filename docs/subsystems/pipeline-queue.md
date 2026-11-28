@@ -1,6 +1,6 @@
 # Pipeline and queue — current-state contract
 
-## Implemented (MVP slices 2 + 3; slice 4A API/server)
+## Implemented (MVP slices 2 + 3; slices 4A API/server and 4B Web workbench)
 
 The ingest pipeline is PostgreSQL + River + S3-protocol object storage, fully
 offline-testable through in-memory fakes. Slice 3 adds the cloud vision parser
@@ -8,7 +8,8 @@ behind the same `ParserAdapter` seam and dual-object (raw + clean) asset
 persistence. Slice 4A adds the store occurrence/variant primitives, a bounded
 `net/http` API, OpenAPI contract, and resident `cmd/examserver` (details below).
 The API remains an internal trusted-network service; it is not intended for
-public exposure. No frontend or DOCX output is implemented.
+public exposure. Slice 4B adds a React/Vite review workbench using that API;
+DOCX output is not implemented.
 
 ### Layout
 
@@ -117,6 +118,24 @@ public exposure. No frontend or DOCX output is implemented.
   raw, or clean key+digest, rejects unavailable/unverified variants, verifies
   bytes, and creates an isolated resolver snapshot/cache for each render.
 
+### Slice 4B Web workbench
+
+- `web/src/app/App.tsx` routes the catalog at `/` and exam review at
+  `/exams/:examId`. The workbench guards navigation while a draft is dirty.
+  `web/src/features/ingest/UploadPanel.tsx` validates a single PDF selection and
+  submits multipart ingest. Stopping or losing the HTTP request does not cancel
+  a queued job; the panel tells the user to check the jobs list before retrying.
+- `web/src/features/catalog/` displays job and exam lists with independent
+  opaque cursors, a job-state filter, and visibility-aware polling of active
+  jobs. Persisted jobs link to the exam; failed jobs show a bounded server
+  summary when available. There is no backend search or job cancellation UI.
+- `web/src/api/client.ts` wraps `fetch` with generated OpenAPI types
+  (`web/src/api/schema.gen.ts`), abort/timeout handling, response metadata,
+  and ETag-guarded writes. `web/vite.config.ts` proxies `/api`, `/healthz`,
+  and `/readyz` in development using `VITE_API_PROXY_TARGET` (default
+  `http://127.0.0.1:8080`). Production API requests default to same origin;
+  `VITE_API_BASE_URL` is an optional public build setting, not a credential.
+
 ### Schema
 
 `assets` (`asset_id` PK, `storage_key` unique, `sha256`, nullable
@@ -185,6 +204,17 @@ error messages.
 - `scripts/verify.sh` (offline, default): pinned tools including `sqlc
   v1.31.1`, `gofmt`, `go vet`, `staticcheck`, `go test -race -count=1 ./...`,
   schema checks, `sqlc diff` drift gate, render smoke and network-cut renders.
+  It calls the Web gate only when both `web/package-lock.json` and
+  `web/node_modules` exist; otherwise it does not require Node or npm.
+- `scripts/verify-web.sh` (standalone, offline): checks Node/npm against
+  `web/package.json`, requires the lockfile and local binaries, compares
+  generated API types, typechecks both strict TypeScript projects, runs Vitest,
+  builds with Vite, and scans `web/dist` for external resource URLs and missing
+  local PDF/KaTeX assets. It never installs dependencies, starts the API, or
+  connects to PostgreSQL, S3, or a vision provider.
+- **Not tried for Web 4B:** a real-browser session with `examserver`,
+  PostgreSQL/River, and S3-compatible storage, including the upload-to-review
+  and edit-to-render flows. The offline gate is not this acceptance check.
 - `scripts/verify-integration.sh` (explicit, never in the default gate):
   `go vet -tags=integration ./...` then `go test -tags=integration -race
   -count=1 ./...` with the `EXAMFORGE_TEST_DATABASE_URL`,
