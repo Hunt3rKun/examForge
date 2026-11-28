@@ -1,0 +1,5 @@
+import {parseInline} from "../inline/parser";
+it("matches the supported inline vectors",()=>{expect(parseInline("已知 $a_n$ **重点** *斜* __下__ {{blank:2}}").tokens).toEqual([{type:"text",text:"已知 "},{type:"math_inline",text:"a_n"},{type:"text",text:" "},{type:"bold",text:"重点"},{type:"text",text:" "},{type:"italic",text:"斜"},{type:"text",text:" "},{type:"underline",text:"下"},{type:"text",text:" "},{type:"blank",index:2}]);});
+it("keeps malformed markup visible and diagnoses it",()=>{const result=parseInline("a $x **b");expect(result.tokens.map(token=>token.type)).toEqual(["text"]);expect(result.diagnostics.map(d=>d.code)).toContain("unclosed_math");});
+it("resolves only permitted escapes and leaves hostile input as text",()=>{expect(parseInline(String.raw`\$5 \*x\* <script>alert(1)</script>`).tokens).toEqual([{type:"text",text:"$5 *x* <script>alert(1)</script>"}]);});
+it("supports large blanks without float precision loss",()=>{const result=parseInline("{{blank:9007199254740992}}");expect(result.tokens[0]).toMatchObject({type:"blank",index:9007199254740992n});});
