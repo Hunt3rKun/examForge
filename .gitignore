@@ -8,6 +8,10 @@
 *.test
 *.out
 
+# Web dependencies and build output
+/web/node_modules/
+/web/dist/
+
 # Generated documents and scratch files
 *.pdf
 *.docx

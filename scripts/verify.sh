@@ -80,4 +80,9 @@ else
   printf 'verify: unshare unavailable; offline render enforced by the blackholed proxy environment\n'
 fi
 
+# Keep the default gate usable without Node or preinstalled Web dependencies.
+if [[ -f web/package-lock.json && -d web/node_modules ]]; then
+  ./scripts/verify-web.sh
+fi
+
 printf 'verify: all checks passed\n'

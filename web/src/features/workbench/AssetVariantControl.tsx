@@ -1,36 +1,38 @@
+import { useId } from "react";
+import { canSelectVariant } from "../../domain/assets";
 import type { AssetState } from "../../domain/exam";
-import { canSelectVariant, variantUrl } from "../../domain/assets";
 
-export type AssetVariantControlProps = {
+type Variant = AssetState["active_variant"];
+type Props = {
   asset: AssetState;
-  onVariantChange: (variant: "raw" | "clean") => void;
-  baseUrl?: string;
+  onVariantChange: (asset: AssetState, variant: Variant) => void;
   busy?: boolean;
+  disabled?: boolean;
   error?: string;
 };
 
-export function AssetVariantControl({ asset, onVariantChange, baseUrl = "", busy = false, error }: AssetVariantControlProps): JSX.Element {
-  const choices: readonly ("raw" | "clean")[] = ["raw", "clean"];
-  return <section className="rounded-lg border border-slate-200 bg-white p-3" data-testid={`asset-${asset.asset_id}`}>
-    <div className="flex items-start justify-between gap-3">
-      <div className="min-w-0">
-        <h3 className="truncate text-sm font-semibold text-slate-800">图片资产</h3>
-        <p className="truncate text-xs text-slate-500" title={asset.asset_id}>{asset.asset_id}</p>
-      </div>
-      <span className="rounded-full bg-slate-100 px-2 py-1 text-xs text-slate-600">当前：{asset.active_variant === "raw" ? "原图" : "清理图"}</span>
-    </div>
-    <img className="mt-3 max-h-40 w-full rounded border border-slate-100 object-contain" src={variantUrl(asset.asset_id, asset.active_variant, baseUrl)} alt={`图片资产 ${asset.asset_id}`} />
-    <div className="mt-3 flex gap-2" role="group" aria-label="图片变体">
+const LABELS = { raw: "原图", clean: "清理图" };
+
+export function AssetVariantControl({ asset, onVariantChange, busy, disabled, error }: Props) {
+  const warningId = useId();
+  const choices = ["raw", "clean"] as const;
+  const rawOnly = canSelectVariant(asset, "raw") && !canSelectVariant(asset, "clean");
+  return <section className="space-y-2 rounded-lg border border-slate-200 bg-white p-3">
+    <h3 className="break-all text-sm font-medium">{asset.asset_id}</h3>
+    <p className="text-xs text-slate-600">当前变体：{LABELS[asset.active_variant]}{rawOnly && " · 仅原图可用"}</p>
+    <p id={warningId} className="text-xs text-amber-800">全局更改：切换此图片的默认变体可能影响其他试卷中使用的同一图片。</p>
+    <div className="flex flex-wrap gap-2" role="group" aria-label={`${asset.asset_id} 的图片变体`} aria-describedby={warningId}>
       {choices.map((variant) => {
         const available = canSelectVariant(asset, variant);
         const selected = asset.active_variant === variant;
-        return <button key={variant} type="button" disabled={!available || selected || busy} aria-pressed={selected} aria-label={variant === "raw" ? "原图" : "清理图"} title={!available && variant === "clean" ? "清理图不可用" : undefined} className={`rounded-md border px-2.5 py-1.5 text-xs ${selected ? "border-indigo-500 bg-indigo-50 text-indigo-700" : "border-slate-300 text-slate-700 hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-40"}`} onClick={() => onVariantChange(variant)}>
-          {variant === "raw" ? "原图" : "清理图"}{!available ? "（不可用）" : ""}
+        return <button key={variant} type="button" disabled={disabled || busy || !available || selected} aria-pressed={selected}
+          className={`rounded border px-2 py-1 text-xs ${selected ? "border-indigo-500 bg-indigo-50 text-indigo-800" : "border-slate-300 text-slate-700 hover:bg-slate-50 disabled:opacity-60"}`}
+          onClick={() => onVariantChange(asset, variant)}>
+          {LABELS[variant]}{!available && "（不可用）"}
         </button>;
       })}
     </div>
-    <p className="mt-2 text-xs text-amber-700">切换会影响使用此 asset_id 的其他试卷。</p>
-    {error && <p role="alert" className="mt-2 text-xs text-red-700">{error}</p>}
-    {busy && <p className="mt-2 text-xs text-slate-500" role="status">正在切换图片变体…</p>}
+    {busy && <p role="status" className="text-xs text-slate-600">正在切换图片变体…</p>}
+    {error && <p role="alert" className="break-words text-sm text-red-800">{error}</p>}
   </section>;
 }

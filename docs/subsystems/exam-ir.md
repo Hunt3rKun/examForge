@@ -17,6 +17,31 @@ Slice 2 implements persistence behind the DTO (`internal/store`, migrations `000
 
 Slice 3 adds source-document asset constraints on top of the unchanged v1 asset shape (`internal/parser/cloud` bbox validation, not the JSON Schema): every model-produced asset must carry a `source_bbox` with finite, correctly ordered corner coordinates in [0,1] whose `page` exists in the rasterized source. The schema itself still cannot bound `page` by the actual document; that check lives in the parser and runs before any crop.
 
+## Web review workbench (slice 4B)
+
+The browser reads the v1 Exam IR and separate occurrence/asset metadata from
+exam detail. `web/src/domain/exam.ts` maps top-level occurrences to questions
+in their sections; reading a composite child uses its path within the parent,
+not an invented `item_id`. `web/src/features/workbench/InspectorPane.tsx`,
+`QuestionEditor.tsx`, and `ContentBlocks.tsx` display structured content.
+Composite children, tables, and unsupported block types are read-only;
+edits to a composite parent do not send a replacement `children` array.
+
+`web/src/domain/item-patch.ts` tracks dirty fields for top-level item PATCH.
+`web/src/features/workbench/Workbench.tsx` sends the original item ETag,
+re-reads the exam after a successful save, and retains the draft on a 409
+instead of overwriting newer data. Shared occurrences carry a copy-on-write
+notice. `web/src/features/workbench/AssetVariantControl.tsx` uses the asset
+selector-state ETag, not the image digest, and uses explicit raw/clean image
+URLs when available instead of opening IR URIs directly. Asset selection is
+global, not a per-question edit.
+
+`web/src/inline/parser.ts` and `renderer.tsx` mirror the supported Go inline
+subset for browser review, with literal fallback and local KaTeX configured
+with `trust: false`. They do not define exchange semantics or PDF output.
+**Not tried for Web 4B:** real-browser/real-service round trips for conflicts,
+copy-on-write, parent edits, and asset-variant changes.
+
 ## Change rule
 
-Schemas are authoritative and must be updated first when changing data shape. Keep this contract synchronized with actual schema, Go, and fixture paths. Inline parsing lives only in Go `internal/ir/inline`; Typst templates consume precomputed tokens and must never re-parse inline markup. Rendering consumes the IR through `internal/render` — see `docs/subsystems/render-engine.md`.
+Schemas are authoritative and must be updated first when changing data shape. Keep this contract synchronized with actual schema, Go, and fixture paths. Go `internal/ir/inline` owns authoritative inline parsing for PDF rendering; Typst templates consume precomputed tokens and must never re-parse inline markup. Rendering consumes the IR through `internal/render` — see `docs/subsystems/render-engine.md`.

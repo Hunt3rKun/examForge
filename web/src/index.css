@@ -5,4 +5,11 @@
 :root { font-family: Inter, ui-sans-serif, system-ui, sans-serif; color: #172033; background: #f5f7fb; }
 * { box-sizing: border-box; }
 body { margin: 0; min-width: 960px; }
+.workbench { min-height: 100vh; background: #f5f7fb; }
+.workbench-toolbar { position: sticky; top: 0; z-index: 20; display: flex; align-items: center; gap: 1rem; min-height: 4rem; padding: .75rem 1.25rem; background: rgba(255,255,255,.96); border-bottom: 1px solid #dbe3ef; }
+.workbench-toolbar h1 { flex: 1; margin: 0; font-size: 1.1rem; }
+.workbench-toolbar a { color: #4454a4; font-size: .9rem; text-decoration: none; }
+.workbench-columns { display: grid; grid-template-columns: minmax(0,1fr) minmax(0,1fr); height: calc(100vh - 4rem); }
+.workbench-scroll { min-width: 0; overflow: auto; padding: 1rem; }
 button, input, textarea, select { font: inherit; }
+@media (max-width: 960px) { body { min-width: 960px; } .workbench-columns { grid-template-columns: minmax(480px,1fr) minmax(480px,1fr); } }
